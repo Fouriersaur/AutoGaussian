@@ -73,9 +73,31 @@ from autogaussian.optimizer import (
     CovarianceArchitectureOptimizer,
     find_minimum_number_auxiliary_modes,
 )
+from autogaussian.certificates import (
+    certify_fit_infeasible,
+    certify_no_hurwitz,
+    certify_passive_range,
+    certify_target_unphysical,
+    lyapunov_feasible,
+    pbh_dark_mode,
+    pbh_non_stabilizable,
+    sos_no_hurwitz,
+)
 from autogaussian.oracle import CovarianceOracle
 from autogaussian.parametrization import Parametrization
 from autogaussian.pipeline import discover
+from autogaussian.search import escalate, is_pruning_frontier
+from autogaussian.search import discover as discover_libraries
+from autogaussian.stability import (
+    abscissa_and_gradient,
+    abscissa_gradient,
+    eigenvalue_condition_number,
+    gradient_sampling,
+    is_hurwitz,
+    rightmost_eigenpair,
+    spectral_abscissa,
+)
+from autogaussian.types import InvalidEntry, Libraries, Verdict
 from autogaussian.postprocess import (
     complexity_table,
     fit_closed_form,
@@ -99,4 +121,13 @@ __all__ = [
     "characterize_architectures", "min_number_of_pumps", "plot_graph",
     "plot_list_of_graphs", "complexity_table", "rank_architectures",
     "symbolic_regression", "fit_closed_form",
+    # two libraries, stability primitives and certificates (Sec. 5, Sec. 6)
+    "Verdict", "InvalidEntry", "Libraries",
+    "discover_libraries", "escalate", "is_pruning_frontier",
+    "spectral_abscissa", "abscissa_gradient", "abscissa_and_gradient",
+    "rightmost_eigenpair", "eigenvalue_condition_number", "gradient_sampling",
+    "is_hurwitz",
+    "certify_fit_infeasible", "certify_no_hurwitz", "certify_passive_range",
+    "certify_target_unphysical", "pbh_dark_mode", "pbh_non_stabilizable",
+    "sos_no_hurwitz", "lyapunov_feasible",
 ]

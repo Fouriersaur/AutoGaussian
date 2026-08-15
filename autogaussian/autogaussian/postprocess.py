@@ -148,13 +148,28 @@ def fit_closed_form(t, y, models=None, relative_tolerance=1.0e-3):
     scale = max(np.ptp(y), 1.0e-12)
 
     results = []
+    rng = np.random.default_rng(0)
     for name, func, expr, symbols in (models or _candidate_models()):
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                popt, _ = curve_fit(func, t, y, maxfev=20000)
-            residual = np.sqrt(np.mean((func(t, *popt) - y) ** 2))
-        except Exception:
+        # multi-start: curve_fit defaults every parameter to 1, which is a
+        # degenerate point for several of these models (e.g. the sqrt-rational
+        # collapses to a constant at b = 1) and it cannot escape.  Try a few
+        # starting points and keep the best fit.
+        num_parameters = len(symbols)
+        starts = [np.ones(num_parameters), -np.ones(num_parameters)]
+        starts.append(np.array([(-1.0) ** k for k in range(num_parameters)]))
+        starts.extend(rng.normal(size=(5, num_parameters)))
+        popt, residual = None, np.inf
+        for start in starts:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    candidate, _ = curve_fit(func, t, y, p0=start, maxfev=20000)
+                value = np.sqrt(np.mean((func(t, *candidate) - y) ** 2))
+            except Exception:
+                continue
+            if np.isfinite(value) and value < residual:
+                popt, residual = candidate, value
+        if popt is None:
             continue
         substituted = expr.subs(
             {symbol: sp.Float(round(float(value), 6)) for symbol, value in zip(symbols, popt)})

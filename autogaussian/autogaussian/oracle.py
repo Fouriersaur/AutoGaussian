@@ -1,25 +1,28 @@
 """
-VALIDITY ORACLE (Sec. 4 of the algorithm flow).
+VALIDITY ORACLE (Sec. 4 + Sec. 5 of the algorithm flow).
 
     function ORACLE(graph, spec):
-        x* = MINIMIZE(LOSS)                  # continuous optimisation
-        if LOSS(x*) > tol:   return INVALID
-        if not STABLE(M(x*)): return INVALID # Sec. 5, a *separate* gate
-        return VALID, x*
+        x0 = MINIMIZE(fit_loss, n_rep restarts)      # reach the target manifold
+        if fit_loss(x0) > tol:    return INVALID_PROV
+        if alpha(M(x0)) < -delta: return VALID, x0   # common case: one eig call
+        x* = constrained_stability_search(seed=x0)   # min alpha s.t. fit <= tol
+        if alpha(M(x*)) < 0:      return VALID, x*
+        return INVALID_PROV                          # provisional, never certified
 
-The loss (App. C) is
+Two properties of that pseudocode are load bearing.
 
-    L(x) = sum_Omega sum_pinned w |sigma_out(Omega)_ij - target_ij|^2
-         + sum_m lambda_m |d^m/dOmega^m [pinned entry] - target|^2
-         + sum_j |f_j(x)|^2
+**The fit is a hard constraint, the stability is the objective.**  The raw
+abscissa ``alpha`` must never be added to the fit loss: minimising
+``fit + rho*alpha`` buys stability by moving off the target (it under-squeezes),
+because ``alpha`` keeps decreasing after the device is already stable.  Only the
+*violation* may enter, through the hinge ``max(0, alpha + delta)^2``, whose
+zero-set is exactly the stable region -- so the weight ``lam`` shapes the path
+but not the solution.
 
-Derivative pins are evaluated by *forward-mode autodiff* in ``Omega`` rather
-than finite differences -- exact, and it removes one source of the kinks that
-App. C warns about.
-
-Because ``sigma_out = S_cal sigma_in S_cal^dag`` is a flat evaluation for a
-stable graph, the verdict is genuinely two-sided: there is no hidden universal
-quantifier and no UNDECIDED outcome.
+**The oracle never certifies INVALID.**  Failing to find a witness is an
+existential failure of an optimiser, not a proof that no witness exists.  The
+certified verdicts are produced only by :mod:`autogaussian.certificates`, via
+:func:`autogaussian.search.escalate`.
 """
 
 import numpy as np
@@ -29,7 +32,7 @@ import scipy.optimize as sciopt
 import sympy as sp
 
 from autogaussian.constraints import ForwardContext
-from autogaussian.forward import max_real_eigenvalue, response_matrices
+from autogaussian.forward import dynamical_matrix, response_matrices
 from autogaussian.nambu import (
     nambu_to_quadrature,
     quadrature_matrix,
@@ -43,7 +46,14 @@ from autogaussian.parametrization import (
     VAR_PHASE,
     VAR_USER,
 )
+from autogaussian.stability import (
+    DEFAULT_CONDITION_LIMIT,
+    abscissa_and_gradient,
+    gradient_sampling,
+    spectral_abscissa,
+)
 from autogaussian.target import PART_FULL, PART_IMAG, PART_REAL
+from autogaussian.types import REASON_FIT, REASON_HURWITZ, Verdict
 
 jax.config.update("jax_enable_x64", True)
 
@@ -75,7 +85,7 @@ PSO_RANGES_DEFAULT = {
 
 
 class CovarianceOracle:
-    """Loss, continuous optimiser and stability gate for one problem spec.
+    """Loss, continuous optimiser and stability search for one problem spec.
 
     Parameters
     ----------
@@ -85,14 +95,20 @@ class CovarianceOracle:
         Declared input covariance of the signal channels (vacuum if omitted).
         *Declared, not optimised* (Sec. 1.2).
     constraints : sequence of :class:`autogaussian.constraints.BaseConstraint`
+        Extra equality constraints ``f_j = 0``; part of the **fit**, i.e. of the
+        hard constraint, not of the objective.
     stability_margin : float
-        Required ``-Re eig(M~) > margin``.
-    stability_weight : float
-        Weight of a soft stability penalty added to the loss.  The hard gate is
-        applied regardless; the penalty only steers the optimiser away from the
-        unstable region (0 disables it).
-    init_ranges : dict
-        Per variable-type initial-guess ranges.
+        ``delta`` of Sec. 5: the margin the stability *search* aims for, and the
+        floor below which the sign of ``alpha`` is numerical noise.  Do not push
+        it below ``cond(lambda) * eps_machine * ||M||``.  Acceptance of a
+        witness is ``alpha < 0``; ``delta`` decides when the search stops and
+        when a fit that already landed stable is good enough to skip it.
+    hinge_weight : float
+        ``lam`` of the hinge used by the constrained stability search.  It
+        shapes the path only -- the zero-set of the hinge is the stable region
+        for any positive ``lam``.
+    init_ranges, pso_ranges : dict
+        Per variable-type initial-guess / swarm-box ranges.
     """
 
     def __init__(
@@ -101,16 +117,21 @@ class CovarianceOracle:
         target,
         sigma_in_signal=None,
         constraints=(),
-        stability_margin=0.0,
-        stability_weight=1.0,
+        stability_margin=1.0e-3,
+        hinge_weight=1.0,
         init_ranges=None,
         pso_ranges=None,
+        condition_limit=DEFAULT_CONDITION_LIMIT,
+        stability_weight=None,
     ):
         self.param = parametrization
         self.target = target
         self.constraints = list(constraints)
         self.stability_margin = float(stability_margin)
-        self.stability_weight = float(stability_weight)
+        # ``stability_weight`` is the pre-two-library name of the hinge weight
+        self.hinge_weight = float(hinge_weight if stability_weight is None
+                                  else stability_weight)
+        self.condition_limit = float(condition_limit)
         self.init_ranges = dict(INIT_RANGES_DEFAULT)
         if init_ranges:
             self.init_ranges.update(init_ranges)
@@ -163,8 +184,12 @@ class CovarianceOracle:
             func = jax.jacfwd(func)
         return func(Omega)
 
+    def _dynamical_matrix(self, x):
+        H, gamma, kappa_tilde, _ = self.param.unpack(x)
+        return dynamical_matrix(H, gamma, kappa_tilde)
+
     # ------------------------------------------------------------------ #
-    # loss assembly
+    # loss assembly -- the FIT ONLY (Sec. 9, invariant 1)
     # ------------------------------------------------------------------ #
 
     def _compile(self):
@@ -233,21 +258,29 @@ class CovarianceOracle:
         omegas = jnp.asarray(self.omegas)
         self._omegas_jnp = omegas
 
-        def loss(x):
+        def residual(x):
+            """Stacked real residual vector ``r(x)`` of the fit (App. C).
+
+            Complex residuals contribute their real and imaginary parts as
+            separate rows, each already multiplied by ``sqrt(weight)``, so that
+            ``fit_loss = 0.5 * ||r||^2`` exactly.
+            """
             responses = jax.vmap(lambda w: self._responses(x, w))(omegas)
             S_all, N_all, V_all = responses
-            total = 0.0
+            parts = []
 
             for part, group in self._groups.items():
                 actual = V_all[group["k"], group["row"], group["col"]]
                 wanted = group["values"](x)
+                root = jnp.sqrt(group["w"])
                 if part == PART_REAL:
-                    residual = jnp.real(actual) - jnp.real(wanted)
+                    parts.append(root * (jnp.real(actual) - jnp.real(wanted)))
                 elif part == PART_IMAG:
-                    residual = jnp.imag(actual) - jnp.imag(wanted)
+                    parts.append(root * (jnp.imag(actual) - jnp.imag(wanted)))
                 else:
-                    residual = actual - wanted
-                total = total + jnp.sum(group["w"] * jnp.abs(residual) ** 2)
+                    delta = actual - wanted
+                    parts.append(root * jnp.real(delta))
+                    parts.append(root * jnp.imag(delta))
 
             if self._form_group is not None:
                 group = self._form_group
@@ -255,19 +288,21 @@ class CovarianceOracle:
                 num_ports = self.num_ports
                 blocks = V_all[group["k"], : 2 * num_ports, : 2 * num_ports]
                 actual = jnp.real(jnp.einsum("ma,mab,mb->m", vectors, blocks, vectors))
-                residual = actual - jnp.real(group["values"](x))
-                total = total + jnp.sum(group["w"] * jnp.abs(residual) ** 2)
+                parts.append(jnp.sqrt(group["w"]) * (actual - jnp.real(group["values"](x))))
 
             for group in self._derivative_groups:
                 dV = self._covariance_derivative(x, group["omega"], group["order"])
                 actual = dV[group["row"], group["col"]]
                 wanted = group["values"](x)
-                residual = actual - wanted
+                root = jnp.sqrt(group["w"])
                 if all(part == PART_REAL for part in group["part"]):
-                    residual = jnp.real(actual) - jnp.real(wanted)
+                    parts.append(root * (jnp.real(actual) - jnp.real(wanted)))
                 elif all(part == PART_IMAG for part in group["part"]):
-                    residual = jnp.imag(actual) - jnp.imag(wanted)
-                total = total + jnp.sum(group["w"] * jnp.abs(residual) ** 2)
+                    parts.append(root * (jnp.imag(actual) - jnp.imag(wanted)))
+                else:
+                    delta = actual - wanted
+                    parts.append(root * jnp.real(delta))
+                    parts.append(root * jnp.imag(delta))
 
             if self.constraints:
                 H, gamma, kappa_tilde, thetas = self.param.unpack(x)
@@ -276,19 +311,28 @@ class CovarianceOracle:
                     omegas=self.omegas, S=S_all, N=N_all, V=V_all,
                     num_modes=self.num_modes, num_ports=self.num_ports,
                 )
-                residuals = jnp.concatenate([jnp.atleast_1d(c(ctx)) for c in self.constraints])
-                total = total + jnp.sum(jnp.abs(residuals) ** 2)
+                values = jnp.concatenate([jnp.atleast_1d(c(ctx)) for c in self.constraints])
+                parts.append(jnp.real(values))
+                parts.append(jnp.imag(values))
 
-            if self.stability_weight > 0.0:
-                H, gamma, kappa_tilde, _ = self.param.unpack(x)
-                excess = max_real_eigenvalue(H, gamma, kappa_tilde) + self.stability_margin
-                total = total + self.stability_weight * jnp.maximum(excess, 0.0) ** 2
+            return jnp.concatenate([jnp.atleast_1d(p) for p in parts])
 
-            return 0.5 * total
+        def loss(x):
+            r = residual(x)
+            return 0.5 * jnp.sum(r ** 2)
 
+        self._residual = residual
         self._loss = loss
+        self.residual_func = jax.jit(residual)
+        self.residual_jacobian = jax.jit(jax.jacfwd(residual))
         self.loss_func = jax.jit(loss)
         self.loss_and_grad = jax.jit(jax.value_and_grad(loss))
+
+        # dM/dx for the analytic abscissa gradient (Sec. 5).  Differentiating
+        # the *matrix* is safe; differentiating its eigenvalues is not, which
+        # is why the eigen-part is done by hand in autogaussian.stability.
+        self._matrix_func = jax.jit(self._dynamical_matrix)
+        self._matrix_jacobian = jax.jit(jax.jacfwd(self._dynamical_matrix))
 
     def _make_value_function(self, values, symbols):
         """Turn the pinned values (numbers and/or sympy expressions) into a
@@ -327,12 +371,71 @@ class CovarianceOracle:
         S, N = response_matrices(H, gamma, kappa_tilde, float(omega))
         return np.asarray(S), np.asarray(N)
 
-    def max_real_eigenvalue(self, x):
-        H, gamma, kappa_tilde, _ = self.param.unpack(jnp.asarray(x))
-        return float(np.real(max_real_eigenvalue(H, gamma, kappa_tilde)))
+    def fit_loss(self, x):
+        return float(self.loss_func(jnp.asarray(x, dtype=float)))
 
-    def is_stable(self, x):
-        return self.max_real_eigenvalue(x) < -self.stability_margin
+    def residual(self, x):
+        return np.asarray(self.residual_func(jnp.asarray(x, dtype=float)))
+
+    def matrix(self, x):
+        """The dimensionless dynamical matrix ``M~(x)`` as a numpy array."""
+        return np.asarray(self._matrix_func(jnp.asarray(x, dtype=float)))
+
+    def matrix_jacobian(self, x, free_idxs=None):
+        """``dM~/dx_k`` with shape ``(K, 2N, 2N)`` (``K`` = free variables)."""
+        jac = np.asarray(self._matrix_jacobian(jnp.asarray(x, dtype=float)))
+        jac = np.moveaxis(jac, -1, 0)                      # (num_vars, 2N, 2N)
+        if free_idxs is not None:
+            jac = jac[np.asarray(free_idxs, dtype=int)]
+        return jac
+
+    def abscissa(self, x):
+        """``alpha(M~(x)) = max Re eig`` -- negative means stable."""
+        return spectral_abscissa(self.matrix(x))
+
+    # kept under the old name: a lot of reporting code reads this key
+    def max_real_eigenvalue(self, x):
+        return self.abscissa(x)
+
+    def is_stable(self, x, margin=None):
+        margin = self.stability_margin if margin is None else float(margin)
+        return bool(self.abscissa(x) < -margin)
+
+    def abscissa_gradient(self, x, free_idxs, rng=None, epsilon=1.0e-4,
+                          allow_sampling=True):
+        """``(alpha, d alpha/dx_free, diagnostics)`` at ``x``.
+
+        Uses the analytic biorthogonal formula, and falls back to gradient
+        sampling when the rightmost eigenvalue is tied or ill-conditioned
+        (Sec. 5 hazards (a) and (b)).
+        """
+        free_idxs = np.asarray(free_idxs, dtype=int)
+        x = np.asarray(x, dtype=float)
+        M = self.matrix(x)
+        dM = self.matrix_jacobian(x, free_idxs)
+        alpha, grad, diagnostics = abscissa_and_gradient(
+            M, dM, condition_limit=self.condition_limit)
+        if diagnostics["trustworthy"] or not allow_sampling:
+            diagnostics["sampled"] = False
+            return alpha, grad, diagnostics
+
+        base = x.copy()
+
+        def matrix_of(x_free):
+            point = base.copy()
+            point[free_idxs] = x_free
+            return self.matrix(point)
+
+        def jacobian_of(x_free):
+            point = base.copy()
+            point[free_idxs] = x_free
+            return self.matrix_jacobian(point, free_idxs)
+
+        grad, info = gradient_sampling(matrix_of, jacobian_of, x[free_idxs],
+                                       epsilon=epsilon, rng=rng)
+        diagnostics.update(info)
+        diagnostics["sampled"] = True
+        return alpha, grad, diagnostics
 
     # ------------------------------------------------------------------ #
     # continuous optimisation
@@ -377,13 +480,21 @@ class CovarianceOracle:
         x0=None,
         solver_options=None,
         check_stability=True,
+        stability_search=True,
         init_ranges=None,
         fixed_values=None,
     ):
-        """One continuous run.  Returns ``(success, info)``.
+        """One continuous run: fit first, then (if needed) the Sec. 5 search.
 
-        ``fixed_values`` maps variable indices to values held fixed (used to
-        sweep a free target symbol during symbolic regression, Sec. 7.2).
+        Returns ``(success, info)``.  ``fixed_values`` maps variable indices to
+        values held fixed (used to sweep a free target symbol during symbolic
+        regression, Sec. 7.2).
+
+        With ``check_stability`` the run only succeeds if the witness is
+        Hurwitz; with ``stability_search`` a fit that landed unstable is handed
+        to :meth:`constrained_stability_search` instead of being thrown away --
+        that is the step which makes stability a *search constraint* rather
+        than a post-hoc filter.
         """
         free_idxs = np.asarray(free_idxs, dtype=int)
         if fixed_values:
@@ -460,7 +571,29 @@ class CovarianceOracle:
 
         x = np.asarray(embed(x_free))
         loss_ok = final < max_violation_success
-        stable = self.is_stable(x)
+        # acceptance is alpha < 0 (Sec. 5.4); the margin delta is what the
+        # stability *search* aims for, and the floor below which the sign of
+        # alpha is numerical noise -- not an extra requirement on a witness
+        alpha = self.abscissa(x)
+        stable = alpha < 0.0
+        margin_met = alpha < -self.stability_margin
+        stability_info = None
+
+        if loss_ok and check_stability and not margin_met and stability_search and len(free_idxs):
+            # Sec. 5: the fit landed on the target manifold but in the unstable
+            # part of it.  Walk along the manifold towards the stable region.
+            x_star, stability_info = self.constrained_stability_search(
+                free_idxs, x, max_violation_success=max_violation_success,
+                fixed_values=fixed_values, rng=rng)
+            if stability_info["success"]:
+                x = x_star
+                final = stability_info["loss_reached"]
+                alpha = stability_info["abscissa"]
+                loss_ok = True
+                stable = True
+                margin_met = stability_info["margin_met"]
+                message = message + " + stability search"
+
         success = bool(loss_ok and (stable or not check_stability))
 
         info = {
@@ -468,7 +601,8 @@ class CovarianceOracle:
             "loss_reached": final,
             "loss_below_tolerance": bool(loss_ok),
             "stable": bool(stable),
-            "max_real_eigenvalue": self.max_real_eigenvalue(x),
+            "margin_met": bool(margin_met),
+            "max_real_eigenvalue": alpha,
             "x": x,
             "x0": np.asarray(embed(x0)),
             "free_idxs": free_idxs,
@@ -476,6 +610,7 @@ class CovarianceOracle:
             "parameters": self.param.physical_report(x),
             "message": message,
             "nit": nit,
+            "stability_search": stability_info,
         }
         return success, info
 
@@ -494,7 +629,13 @@ class CovarianceOracle:
         **kwargs
     ):
         """Repeat the continuous optimisation ``num_tests`` times to suppress
-        false negatives from local minima (Sec. 4)."""
+        false negatives from local minima (Sec. 4).
+
+        The restarts have a second role (Sec. 5): distinct starting points land
+        in *distinct feasible components* of the target manifold -- different
+        Bloch-Messiah branches / auxiliary frames -- and stability is not a
+        property of the manifold but of the component.
+        """
         rng = np.random.default_rng() if rng is None else rng
         infos = []
         for _ in range(int(num_tests)):
@@ -503,6 +644,224 @@ class CovarianceOracle:
             if success and interrupt_if_successful:
                 return True, infos
         return any(info["success"] for info in infos), infos
+
+    # ------------------------------------------------------------------ #
+    # Sec. 5 -- constrained stability search
+    # ------------------------------------------------------------------ #
+
+    def constrained_stability_search(
+        self,
+        free_idxs,
+        seed,
+        method="hinge",
+        max_violation_success=1.0e-10,
+        hinge_weight=None,
+        max_iterations=300,
+        fixed_values=None,
+        rng=None,
+        step=0.1,
+        allow_sampling=True,
+        **method_kwargs
+    ):
+        """``min alpha(M(x))  s.t.  fit(x) <= tol``, warm-started from ``seed``.
+
+        ``method='hinge'`` minimises ``||r||^2/2 + lam*max(0, alpha+delta)^2``
+        with L-BFGS-B and the analytic abscissa gradient; robust, and the only
+        thing ``lam`` can change is the path, because the hinge vanishes on the
+        whole stable region.
+
+        ``method='reduced'`` is the projected variant: step along
+        ``-(I - J^+ J) grad alpha`` (the steepest stability descent that
+        preserves the fit to first order), then restore feasibility with one or
+        two Gauss-Newton steps ``x <- x - J^+ r``.  It gives an explicit margin
+        rather than a trade-off.
+
+        Returns ``(x, info)``.
+        """
+        free_idxs = np.asarray(free_idxs, dtype=int)
+        seed = np.asarray(seed, dtype=float)
+        if method == "reduced":
+            return self._reduced_gradient_search(
+                free_idxs, seed, max_violation_success=max_violation_success,
+                max_iterations=max_iterations, step=step, rng=rng,
+                allow_sampling=allow_sampling, **method_kwargs)
+        return self._hinge_search(
+            free_idxs, seed, max_violation_success=max_violation_success,
+            hinge_weight=hinge_weight, max_iterations=max_iterations,
+            fixed_values=fixed_values, rng=rng, allow_sampling=allow_sampling,
+            **method_kwargs)
+
+    def _hinge_search(self, free_idxs, seed, max_violation_success, hinge_weight,
+                      max_iterations, fixed_values, rng, allow_sampling,
+                      weight_ladder=(1.0, 10.0, 100.0)):
+        """Hinge descent with a weight ladder.
+
+        The zero-set of ``||r||^2/2 + lam*max(0, alpha+delta)^2`` does not
+        depend on ``lam``, so climbing the ladder cannot change *which* points
+        count as solutions -- it only re-balances the two terms along the way,
+        which is what a local method needs when the seed sits deep inside the
+        unstable region (the fit term is already ~0 there and cannot help).
+        """
+        base_lam = self.hinge_weight if hinge_weight is None else float(hinge_weight)
+        delta = self.stability_margin
+        _, fit_value_and_grad = self._constrained_functions(free_idxs, fixed_values)
+        base = np.asarray(seed, dtype=float)
+        total_sampled = 0
+        attempts = []
+
+        for factor in weight_ladder:
+            lam = base_lam * float(factor)
+            state = {"best": None, "best_alpha": np.inf, "hit": False, "sampled": 0}
+
+            def full(x_free):
+                point = base.copy()
+                point[free_idxs] = np.asarray(x_free, dtype=float)
+                return point
+
+            def objective(x_free):
+                fit, fit_grad = fit_value_and_grad(x_free)
+                point = full(x_free)
+                alpha, alpha_grad, diagnostics = self.abscissa_gradient(
+                    point, free_idxs, rng=rng, allow_sampling=allow_sampling)
+                if diagnostics.get("sampled"):
+                    state["sampled"] += 1
+                if not np.isfinite(alpha) or not np.isfinite(fit):
+                    # the line search walked into overflow; hand back a wall
+                    # rather than an inf, which L-BFGS-B cannot back off from
+                    return 1.0e30, np.zeros_like(np.asarray(fit_grad))
+                violation = max(0.0, alpha + delta)
+                value = fit + lam * violation ** 2
+                grad = fit_grad + 2.0 * lam * violation * alpha_grad
+                if fit < max_violation_success and alpha < state["best_alpha"]:
+                    state["best_alpha"] = alpha
+                    state["best"] = point.copy()
+                    if alpha < -delta:
+                        state["hit"] = True
+                return value, grad
+
+            def callback(xk, *args):
+                if state["hit"]:
+                    raise StopIteration
+
+            try:
+                result = sciopt.minimize(
+                    objective, base[free_idxs], jac=True, method="L-BFGS-B",
+                    callback=callback,
+                    options={"maxiter": int(max_iterations), "maxfun": 100000,
+                             "ftol": 0.0, "gtol": 0.0})
+                endpoint = full(result.x)
+            except StopIteration:
+                endpoint = None
+
+            total_sampled += state["sampled"]
+            candidates = [p for p in (state["best"], endpoint) if p is not None]
+            for candidate in candidates:
+                loss = self.fit_loss(candidate)
+                alpha = self.abscissa(candidate)
+                attempts.append((candidate, loss, alpha, lam))
+                if loss < max_violation_success and alpha < 0.0:
+                    return candidate, {
+                        "method": "hinge", "success": True, "loss_reached": loss,
+                        "abscissa": alpha, "margin_met": bool(alpha < -delta),
+                        "hinge_weight": lam, "num_sampled_gradients": total_sampled,
+                    }
+
+        if attempts:
+            # report the attempt that came closest to a stable fit
+            feasible = [a for a in attempts if a[1] < max_violation_success]
+            candidate, loss, alpha, lam = min(feasible or attempts,
+                                              key=lambda a: (a[2], a[1]))
+        else:
+            candidate, lam = base, base_lam
+            loss, alpha = self.fit_loss(base), self.abscissa(base)
+        return candidate, {
+            "method": "hinge",
+            "success": False,
+            "loss_reached": loss,
+            "abscissa": alpha,
+            "margin_met": bool(alpha < -delta),
+            "hinge_weight": lam,
+            "num_sampled_gradients": total_sampled,
+        }
+
+    def _reduced_gradient_search(self, free_idxs, seed, max_violation_success,
+                                 max_iterations, step, rng, allow_sampling):
+        delta = self.stability_margin
+        base = np.asarray(seed, dtype=float)
+        x = base.copy()
+        sampled = 0
+
+        def residual_and_jacobian(point):
+            r = np.asarray(self.residual_func(jnp.asarray(point)))
+            J = np.asarray(self.residual_jacobian(jnp.asarray(point)))[:, free_idxs]
+            return r, J
+
+        current_step = float(step)
+        for _ in range(int(max_iterations)):
+            alpha, alpha_grad, diagnostics = self.abscissa_gradient(
+                x, free_idxs, rng=rng, allow_sampling=allow_sampling)
+            if diagnostics.get("sampled"):
+                sampled += 1
+            if not np.isfinite(alpha):
+                break
+            if alpha < -delta and self.fit_loss(x) < max_violation_success:
+                break
+            r, J = residual_and_jacobian(x)
+            pinv = np.linalg.pinv(J)
+            projector = np.eye(len(free_idxs)) - pinv @ J
+            direction = -projector @ alpha_grad
+            norm = np.linalg.norm(direction)
+            if norm < 1.0e-14:
+                break
+            candidate = x.copy()
+            candidate[free_idxs] = candidate[free_idxs] + current_step * direction / norm
+            # restore the fit: one or two Gauss-Newton steps back onto r = 0
+            for _ in range(2):
+                r_c, J_c = residual_and_jacobian(candidate)
+                candidate[free_idxs] = candidate[free_idxs] - np.linalg.pinv(J_c) @ r_c
+            if self.fit_loss(candidate) > max_violation_success:
+                current_step *= 0.5
+                if current_step < 1.0e-10:
+                    break
+                continue
+            if self.abscissa(candidate) >= alpha:
+                current_step *= 0.5
+                if current_step < 1.0e-10:
+                    break
+                continue
+            x = candidate
+
+        loss = self.fit_loss(x)
+        alpha = self.abscissa(x)
+        success = bool(loss < max_violation_success and alpha < 0.0)
+        return x, {
+            "method": "reduced",
+            "success": success,
+            "loss_reached": loss,
+            "abscissa": alpha,
+            "margin_met": bool(alpha < -delta),
+            "num_sampled_gradients": sampled,
+        }
+
+    # ------------------------------------------------------------------ #
+    # Sec. 4 -- the verdict itself
+    # ------------------------------------------------------------------ #
+
+    def verdict(self, free_idxs, num_tests=10, rng=None, **kwargs):
+        """The Sec. 4 pseudocode.  Returns ``(Verdict, info)``.
+
+        Only ``VALID`` or ``INVALID_PROV`` -- the oracle never certifies
+        (Sec. 9, invariant 2).
+        """
+        success, infos = self.repeated_optimize(free_idxs, num_tests=num_tests,
+                                                rng=rng, **kwargs)
+        if success:
+            witness = next(info for info in infos if info["success"])
+            return Verdict.VALID, witness
+        best = min(infos, key=lambda info: info["loss_reached"])
+        best["reason"] = (REASON_HURWITZ if best["loss_below_tolerance"] else REASON_FIT)
+        best["all_infos"] = infos
+        return Verdict.INVALID_PROV, best
 
 
 # ---------------------------------------------------------------------------

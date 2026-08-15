@@ -176,18 +176,48 @@ def broadband_squeezer(variance=0.5, num_derivatives=2, port=0, bandwidth=None,
 # B.5 CV graph-state emitter
 # --------------------------------------------------------------------------
 
-def cv_graph_state(edges=((0, 1),), epsilon=0.1, num_ports=2):
-    """Pin one nullifier variance per graph edge:
-    ``Var(p_i - x_j) = epsilon``."""
+def cv_graph_state(edges=((0, 1),), epsilon=0.1, num_ports=2, nullifiers="per_node"):
+    """Emitted CV cluster state defined by a graph ``edges``.
+
+    A CV graph state with adjacency ``A`` is the state annihilated by one
+    nullifier **per node**,
+
+        n_i = p_i - sum_j A_ij x_j ,      Var(n_i) = epsilon  ->  0
+
+    so an ``M``-edge graph on ``P`` modes contributes ``P`` pins, not ``M``.
+    Pinning only *one* nullifier is badly under-specified: it is satisfiable by
+    two **decoupled** squeezers (squeeze ``p_0`` in one mode and ``x_1`` in the
+    other), which is not a cluster state at all -- the conjugate combination
+    then blows up to keep the state pure.  See Sec. 11.
+
+    ``nullifiers='per_edge'`` restores the older, looser behaviour of pinning
+    one ``Var(p_i - x_j)`` per edge, for comparison.
+    """
     target = CovarianceTarget(num_ports=num_ports, name="CV graph state")
-    for i, j in edges:
-        vector = np.zeros(2 * num_ports)
-        vector[qidx(i, P)] = 1.0
-        vector[qidx(j, X)] = -1.0
-        target.pin_form(vector, epsilon)
+
+    if nullifiers == "per_edge":
+        for i, j in edges:
+            vector = np.zeros(2 * num_ports)
+            vector[qidx(i, P)] = 1.0
+            vector[qidx(j, X)] = -1.0
+            target.pin_form(vector, epsilon)
+    else:
+        adjacency = np.zeros((num_ports, num_ports))
+        for i, j in edges:
+            adjacency[i, j] = adjacency[j, i] = 1.0
+        for i in range(num_ports):
+            if not adjacency[i].any():
+                continue
+            vector = np.zeros(2 * num_ports)
+            vector[qidx(i, P)] = 1.0
+            for j in range(num_ports):
+                if adjacency[i, j]:
+                    vector[qidx(j, X)] -= 1.0
+            target.pin_form(vector, epsilon)
+
     return GalleryProblem(
         target,
-        notes="B.5  nullifier variances -> emitted cluster state.",
+        notes="B.5  one nullifier per node -> emitted cluster state.",
         suggested={"optimize_gauge": False},
     )
 

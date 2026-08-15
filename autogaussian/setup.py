@@ -21,6 +21,13 @@ setup(
         "matplotlib",
         "tqdm",
     ],
+    extras_require={
+        # infeasibility certificates (Sec. 6): the fit-range SDP and the
+        # Lyapunov LMI.  Without it those rungs report "inconclusive" and every
+        # unresolved graph stays uncertified -- the search is still correct,
+        # just less able to prove anything.
+        "certificates": ["cvxpy"],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "Topic :: Scientific/Engineering :: Physics",

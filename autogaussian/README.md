@@ -68,8 +68,11 @@ squeezing axis is rotated into place by a detuning.
 | §1 problem specification (pins)     | `autogaussian/target.py`              |
 | §1.4 extra constraints `f_j = 0`    | `autogaussian/constraints.py`         |
 | §2, App. A.4 learnable parameters   | `autogaussian/parametrization.py`     |
-| §4 validity oracle + §5 stability gate + App. C loss/optimisers | `autogaussian/oracle.py` |
-| §6 discrete search, monotone pruning | `autogaussian/optimizer.py`, `graph.py` |
+| §4 validity oracle + §5 constrained stability search + App. C loss/optimisers | `autogaussian/oracle.py` |
+| §5 abscissa, biorthogonal gradient, gradient sampling | `autogaussian/stability.py` |
+| §4/§6 verdicts, two libraries, `certified` flag | `autogaussian/types.py`     |
+| §6 discrete search, two-library BFS, ESCALATE | `autogaussian/search.py`, `optimizer.py`, `graph.py` |
+| §6 infeasibility certificates (fit-range SDP, PBH, SOS stub) | `autogaussian/certificates.py` |
 | §7 complexity analysis + symbolic regression | `autogaussian/postprocess.py` |
 | §9 top-level `MAIN`                 | `autogaussian/pipeline.py` (`discover`) |
 | App. B worked target gallery        | `autogaussian/gallery.py`             |
@@ -137,12 +140,19 @@ Full searches actually run at `N = 2` (lattice 324):
 | B.1 single-mode squeezer | 47 | 2 s | 2 |
 | B.2 EPR source | 47 | 4 s | 3 |
 | B.4 broadband squeezer | 241 | 43 s | 9 (see note) |
-| B.5 CV graph state (1 nullifier) | — | 30 s | 12 |
+| B.5 CV graph state (2-node cluster) | 153 | 20 s | 3 |
 | B.6 backaction-evading readout | 207 | 10 s | 3 |
 | B.7 noise diode | 29 | 38 s | 3 |
 
-The weakly-constrained targets (B.5 pins one nullifier, B.6 one cross-term) admit many
-irreducible devices — that is the target being loose, not the search misbehaving.
+B.1/B.2 come from `examples/01`, B.4 from `examples/02`, B.5–B.7 from `examples/04`.
+
+B.6 pins a single cross-term and is satisfied trivially by a bare beam-splitter — that is the
+target being loose, not the search misbehaving. B.5 was the same until its target was tightened:
+pinning *one* nullifier admitted 12 irreducible devices, several of them two **decoupled**
+squeezers (squeeze `p₀` in one mode, `x₁` in the other, blow the conjugate combination up to 3e6
+to stay pure). `cv_graph_state` now pins one nullifier **per node**, `n_i = p_i − Σ_j A_ij x_j`,
+which is how a CV graph state is actually defined; that cuts the list to 3 and every survivor
+genuinely couples the modes.
 
 **B.4 is not converged at `num_tests=15`.** One of its irreducible graphs is found in only ~50 %
 of seeds with plain BFGS restarts, so the count above is a lower bound. This is the false-negative
@@ -161,19 +171,72 @@ starts in the wrong basin. It costs roughly 10x per oracle call, so the practica
 BFGS for the layer sweep and the hybrid for the verification descent, via
 `perform_breadth_first_search(verify_kwargs={"method": "pso+bfgs"})`.
 
+## Two libraries and the completeness caveat (§6, §8)
+
+A search that fails to find a witness has learned something much weaker than a search that
+proves none exists, and the difference decides whether a whole subtree may be deleted. The
+engine therefore keeps **two libraries** and a `certified` flag:
+
+| verdict           | meaning                                  | may condemn subgraphs? |
+|-------------------|------------------------------------------|------------------------|
+| `VALID`           | witness stored (`fit ≤ tol`, `α < 0`)    | extensions are valid   |
+| `INVALID_PROV`    | the oracle did not find a witness        | **no**                 |
+| `INVALID_CERT`    | a certificate proved there is none       | yes                    |
+| `INVALID_DEFAULT` | escalation ran, nothing fired            | **no**                 |
+
+```python
+result = discover(target, num_auxiliary_modes=0)
+result["n_uncertified"]     # graphs rejected without a proof
+print(result["completeness"])
+# The list of irreducible graphs is complete up to at most 3 false negatives ...
+```
+
+`n_uncertified == 0` is the only configuration in which the run may claim a complete, certified
+answer; otherwise the uncertified rejections are listed by name so the caveat is auditable. The
+escalation ladder (`autogaussian/search.py`) is: cheap structural certificates → fresh seeds from
+different feasible components (this rung can promote a graph to `VALID`) → PBH dark mode → give
+up loudly. Certificates live in `certificates.py`:
+
+* `certify_passive_range` — a beam-splitter-only graph maps vacuum to vacuum at every frequency,
+  so any non-vacuum pin is unreachable *for that graph*. Closed form, graph-dependent, a proof.
+* `certify_target_unphysical` — SDP feasibility of `V + iΩ ⪰ 0` under the pins. Infeasible means
+  no quantum state has those second moments, so no graph does either. Needs `cvxpy`
+  (`pip install autogaussian[certificates]`); without it the rung reports "inconclusive".
+* `pbh_dark_mode` — real, and honest about its reach: in *this* device family every mode is
+  coupled to an input line, so the test can never fire. It is the one Hurwitz certificate that is
+  a theorem rather than a stub, and it does fire for families with undamped internal modes.
+* `sos_no_hurwitz` — **stub**. `method="sos"` raises `NotImplementedError` with the interface
+  fixed; the v1 stand-in samples the feasible set and reports evidence, which is not a proof, so
+  it never certifies. Everything it touches becomes `INVALID_DEFAULT` and keeps its subtree alive.
+
+The price is oracle calls: not condemning uncertified subtrees means testing them. Pass
+`search_kwargs={"prune_uncertified": True}` to reinstate AUTOSCATTER's faster, **unsound** rule,
+or `engine="legacy"` for the old walk plus its `verify_irreducibility` repair pass.
+
 ## Notes on the oracle
 
-* **Stability is a separate gate** (§5): a run counts as VALID only if the loss is below
-  tolerance *and* `max Re eig(M̃) < 0`. A soft stability penalty (weight configurable, on by
-  default) keeps the optimiser out of the unstable region; the hard gate decides.
+* **Stability is a search constraint, not a filter** (§5). The fit is the hard constraint and
+  contains *no* stability term; a fit that lands in the unstable part of the target manifold is
+  handed to `constrained_stability_search`, which minimises the abscissa subject to `fit ≤ tol`
+  (hinge `‖r‖²/2 + λ·max(0, α+δ)²`, or a reduced-gradient variant that steps in the tangent space
+  of the fit manifold). Never add the raw `α` to the loss: it keeps paying for margin it already
+  has, and the only currency it has is the target — `tests/test_constrained_stability.py`
+  documents the resulting drift (0.500 → 0.552 as `ρ` grows), and the hinge's independence of `λ`.
+* **The abscissa gradient is analytic, never autodiffed through `eig`** (§5):
+  `∂Re λ_max/∂x_k = Re(uᴴ (∂M/∂x_k) v)/(uᴴv)`, with the eigenvalue condition number `1/|uᴴv|`
+  monitored. Two hazards are handled: a rightmost tie whose members disagree (Lipschitz corner →
+  minimum-norm element of the convex hull) and an exceptional point where `1/|uᴴv|` diverges like
+  `t^{-1/2}` (→ gradient sampling over a ball wide enough to straddle it). The conjugate tie that
+  BdG structure forces on every oscillating mode is *spurious* and is recognised as such by
+  comparing the tied gradients rather than counting them.
 * **Derivative pins use forward-mode autodiff in `Ω`**, not finite differences — exact, and it
   removes one of the sources of kinks App. C warns about. A gradient-free particle swarm is
   available via `kwargs_optimization={"method": "pso"}` for the rest.
-* **False negatives are the one real failure mode.** A graph the continuous optimiser fails to
-  solve marks all of its subgraphs invalid and can hide a genuinely minimal device. The search
-  therefore ends with `verify_irreducibility()`, a complete descent below every valid graph with
-  3× the restarts, which repairs exactly the part of the lattice that decides the answer. Raise
-  `kwargs_optimization={"num_tests": …}` if results still look unstable between seeds.
+* **False negatives are the one real failure mode**, and the two-library engine answers them by
+  construction: an uncertified invalid never removes its subgraphs from the search, so a bad
+  afternoon at the optimiser costs oracle calls rather than solutions. What survives is reported
+  as `n_uncertified`. Raise `kwargs_optimization={"num_tests": …}` to shrink it; with
+  `engine="legacy"` the old repair pass `verify_irreducibility()` is still available.
 * **Under-specified targets are met trivially** (§11): "squeeze port 1, vacuum port 2" is
   satisfied by decoupling the ports. Add a `TransmissionConstraint` so the minimal solution is a
   single connected device.
@@ -213,17 +276,44 @@ C_00 = 1.000*(sqrt(v) - 1.0)**2/(sqrt(v) + 1.000)**2      [rmse 9e-08]
 arg(nu_00) = -1.570796                                     [constant]
 ```
 
+## Notebooks
+
+Every example also exists as a notebook, runnable in Google Colab (no local install, no CPU
+of yours burnt) — the first cell installs the package when it detects Colab:
+
+| notebook | contents | Colab |
+|---|---|---|
+| `1_squeezing_sources.ipynb` | B.1 single-mode squeezer, `C₀₀(v)` construction rule, B.2 EPR source | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/1_squeezing_sources.ipynb) |
+| `2_directional_and_broadband.ipynb` | B.3 directionality (aux-mode budget), B.4 flat-band squeezer + spectrum plot | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/2_directional_and_broadband.ipynb) |
+| `3_reference_table.ipynb` | the App. F reference table, row by row | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/3_reference_table.ipynb) |
+| `4_gallery_sweep.ipynb` | B.5 nullifiers, B.6 cross-term, B.7 thermal input, with graph plots | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/4_gallery_sweep.ipynb) |
+
+The badges point at `main` of the public repo; the notebooks also run locally from a clone
+(the install cell falls back to putting the package root on `sys.path`).
+
 ## Tests and examples
 
 ```bash
-python tests/test_forward.py     # forward map vs closed forms (9 checks)
-python tests/test_oracle.py      # two-sided verdicts, gauge, constraints (8 checks)
-python tests/test_search.py      # lattice, monotonicity, full searches (7 checks)
+python tests/test_forward.py               # forward map vs closed forms (9 checks)
+python tests/test_oracle.py                # two-sided verdicts, gauge, constraints (8 checks)
+python tests/test_search.py                # lattice, monotonicity, full searches (7 checks)
+python tests/test_stability.py             # abscissa gradient, ties, exceptional points (7)
+python tests/test_constrained_stability.py # hinge vs value penalty, reduced gradient (5)
+python tests/test_search_invariants.py     # two-library invariants, pruning frontier (8)
+python tests/test_certificates.py          # fit-range SDP, passive range, PBH, stubs (9)
+python tests/test_integration.py           # end-to-end libraries + completeness (2)
 
 python examples/01_discover_squeezers.py        # B.1 + B.2 discovery + construction rules
 python examples/02_directional_and_spectral.py  # B.3 directionality, B.4 flat band
 python examples/03_reference_table.py           # reproduces the App. F reference table
+python examples/04_gallery_sweep.py             # B.5 nullifiers, B.6 cross-term, B.7 thermal input
 ```
+
+`04_gallery_sweep.py` covers the three gallery targets that exercise machinery nothing else
+touches: `pin_form` quadratic-form pins (B.5), a lone pinned cross-term (B.6), and a declared
+non-vacuum `σ_in` (B.7). It also prints where those App. B targets are under-specified — B.6 as
+written is satisfied trivially by a bare beam-splitter, and B.7 leaves port 2 free, which the
+search drives to variance ~1e7 against the stability boundary.
 
 Example 2 also reproduces App. F's structural claim directly: with the backward direction
 pinned to zero, **0 auxiliary modes is INVALID** (best loss 0.27) and **1 damped auxiliary is

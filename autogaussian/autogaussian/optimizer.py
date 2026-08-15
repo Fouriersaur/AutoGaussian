@@ -1,15 +1,17 @@
 """
-DISCRETE SEARCH -- minimal + complete enumeration (Sec. 6 of the algorithm flow).
-
-Inherited from AUTOSCATTER unchanged: monotonicity of validity under edge
-addition/removal drives a breadth-first descent through the graph lattice, so a
-complete enumeration only ever tests a small fraction of the graphs.
+DISCOVERY DRIVER (Sec. 6 of the algorithm flow).
 
     (a) grow the number of auxiliary modes until the fully connected graph is VALID
-    (b) walk down the lattice by complexity, pruning with
-          - if a graph is INVALID, every subgraph is INVALID
-          - if a graph is VALID,   every extension is VALID
+    (b) walk down the lattice by complexity -- :func:`autogaussian.search.discover`
     (c) the minimal elements of the valid library are the irreducible graphs
+
+This module owns the *device-level* bookkeeping (graph space, parametrisation,
+oracle, graph reduction, reporting).  The lattice walk itself lives in
+:mod:`autogaussian.search`, because its pruning rules are where correctness is
+won or lost: only a **certified** invalid may condemn its subgraphs, and the
+oracle never certifies.  The legacy AUTOSCATTER walk -- in which any invalid
+condemns its subtree, repaired afterwards by :meth:`verify_irreducibility` --
+is still reachable via ``engine='legacy'``.
 """
 
 import numpy as np
@@ -28,6 +30,7 @@ from autogaussian.graph import (
 )
 from autogaussian.oracle import CovarianceOracle
 from autogaussian.parametrization import Parametrization
+from autogaussian.search import discover
 
 __all__ = ["CovarianceArchitectureOptimizer", "find_minimum_number_auxiliary_modes"]
 
@@ -74,7 +77,7 @@ class CovarianceArchitectureOptimizer:
         optimize_gauge=True,
         constraints=(),
         graph_space=None,
-        stability_margin=0.0,
+        stability_margin=1.0e-3,
         stability_weight=1.0,
         asymptotic_bus_modes=(),
         bus_cooperativity=1.0e6,
@@ -133,6 +136,7 @@ class CovarianceArchitectureOptimizer:
 
         self.rng = np.random.default_rng(seed)
 
+        self.libraries = None        # set by the two-library engine (Sec. 6)
         self.valid_combinations = []
         self.invalid_combinations = []
         self.tested_complexities = []
@@ -358,9 +362,43 @@ class CovarianceArchitectureOptimizer:
             self.cleanup_valid_combinations()
         return np.array(self.valid_combinations, dtype="int8")
 
-    def perform_breadth_first_search(self, min_complexity=0, progress=True, verify=True,
-                                     verify_num_tests=None, verify_kwargs=None):
-        """Full Sec. 6 loop; returns the irreducible graphs."""
+    def perform_breadth_first_search(self, min_complexity=0, progress=True, verify=None,
+                                     verify_num_tests=None, verify_kwargs=None,
+                                     engine="two_library", **search_kwargs):
+        """Full Sec. 6 loop; returns the irreducible graphs.
+
+        ``engine='two_library'`` (default) runs :func:`autogaussian.search.discover`
+        and leaves the two libraries on ``self.libraries``; a graph is only
+        removed from consideration by a certificate, so no post-hoc repair pass
+        is needed and ``verify`` defaults to ``False``.
+
+        ``engine='legacy'`` is the AUTOSCATTER walk: any invalid condemns its
+        subgraphs, and :meth:`verify_irreducibility` afterwards re-derives
+        irreducibility inside the sub-lattice to repair the false negatives
+        that rule creates.  Faster, and complete only if the oracle never
+        misses.
+        """
+        if engine == "two_library":
+            libraries = discover(self, min_complexity=min_complexity, progress=progress,
+                                 **search_kwargs)
+            self.libraries = libraries
+            self.valid_combinations = [np.asarray(g, dtype="int8")
+                                       for g in libraries.minimal_valid()]
+            self.invalid_combinations = [np.asarray(e.graph, dtype="int8")
+                                         for e in libraries.invalid.values()]
+            if verify:
+                print("verifying irreducibility (repairs false negatives)")
+                self.verify_irreducibility(num_tests=verify_num_tests, progress=progress,
+                                           **(verify_kwargs or {}))
+            print("optimisation finished, list of irreducible graphs has %i elements "
+                  "(%i uncertified rejections)"
+                  % (len(self.valid_combinations), libraries.n_uncertified()))
+            return np.array(self.valid_combinations, dtype="int8")
+
+        if engine != "legacy":
+            raise ValueError("unknown engine %r" % engine)
+
+        verify = True if verify is None else verify
         print("start breadth-first search over %i slots (max complexity %i)"
               % (self.space.num_slots, self.space.max_complexity))
         for level in range(self.space.max_complexity, min_complexity - 1, -1):
@@ -377,6 +415,20 @@ class CovarianceArchitectureOptimizer:
         print("optimisation finished, list of irreducible graphs has %i elements"
               % len(self.valid_combinations))
         return np.array(self.valid_combinations, dtype="int8")
+
+    # ------------------------------------------------------------------ #
+    # Sec. 8 -- completeness reporting
+    # ------------------------------------------------------------------ #
+
+    def n_uncertified(self):
+        """Graphs rejected without an infeasibility certificate (Sec. 8)."""
+        return 0 if self.libraries is None else self.libraries.n_uncertified()
+
+    def completeness_statement(self):
+        if self.libraries is None:
+            return ("No two-library run recorded: completeness cannot be stated "
+                    "(the legacy engine prunes on uncertified invalids).")
+        return self.libraries.completeness_statement(self.space)
 
     # ------------------------------------------------------------------ #
     # reporting (Sec. 7.1 / Sec. 8)
