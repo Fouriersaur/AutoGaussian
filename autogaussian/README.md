@@ -261,6 +261,14 @@ When a coupling restriction forces mediation through a bus, pass
 `√Λ` per bus endpoint, so a self term scales with `Λ` and a link with `√Λ`: the ratios
 `C_ajb/√C_bb` stay finite, the bus is virtually occupied, and the residual error is `~1/C_bus`.
 
+Worked example in `1_squeezing_sources.ipynb` (B.2′): the EPR target of B.2 with the port–port
+edge forbidden, `forbidden_couplings=[(0, 1)]` — the covariance analogue of AUTOSCATTER's
+far-detuned bus modes in `6_optomechanical_circulator.ipynb`. Two irreducible mirror-image
+architectures come out, each with **two** couplings (squeezing port→bus, beam-splitter bus→port),
+and holding their ratios fixed while lowering `Λ` reproduces the `1/C_bus` error law. Without the
+block the same architecture is still found, but only by running the cooperativities up to `~1e5`:
+`asymptotic_bus_modes` adds no solutions, it makes the limit point representable.
+
 ## Construction rules (§7.2)
 
 ```python
@@ -283,8 +291,8 @@ of yours burnt) — the first cell installs the package when it detects Colab:
 
 | notebook | contents | Colab |
 |---|---|---|
-| `1_squeezing_sources.ipynb` | B.1 single-mode squeezer, `C₀₀(v)` construction rule, B.2 EPR source | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/1_squeezing_sources.ipynb) |
-| `2_directional_and_broadband.ipynb` | B.3 directionality (aux-mode budget), B.4 flat-band squeezer + spectrum plot | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/2_directional_and_broadband.ipynb) |
+| `1_squeezing_sources.ipynb` | B.1 single-mode squeezer, `C₀₀(v)` construction rule, B.2 EPR source, B.2′ EPR through an asymptotic bus (§7.3) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/1_squeezing_sources.ipynb) |
+| `2_directional_and_broadband.ipynb` | B.3 directionality (aux-mode budget + greedy minimal subgraph), B.4 flat-band squeezer + full BFS over all 3⁶ graphs | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/2_directional_and_broadband.ipynb) |
 | `3_reference_table.ipynb` | the App. F reference table, row by row | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/3_reference_table.ipynb) |
 | `4_gallery_sweep.ipynb` | B.5 nullifiers, B.6 cross-term, B.7 thermal input, with graph plots | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/4_gallery_sweep.ipynb) |
 
@@ -335,5 +343,8 @@ the vacuum floor.
 * Active targets live near the parametric-oscillation threshold — target a finite squeezing
   depth and map the stability frontier rather than chasing `variance → 0`.
 * Intrinsic loss `γ` mixes vacuum in through `N`; the squeezing floor rises with `γ`.
-* Directionality itself is a *finite*-cooperativity effect; only a mediation restriction pushes
-  a target onto the asymptotic manifold.
+* Directionality itself is a *finite*-cooperativity effect; a mediation restriction is what pushes
+  a target onto the asymptotic manifold — and then only its *minimal* architectures. B.2′ makes
+  the distinction concrete: the two-coupling solutions of the mediated EPR source live at
+  `C_bus → ∞`, while the same target with the full element budget (port detunings, a degenerate
+  pump on the mediator) is met by a resonant auxiliary mode at cooperativities of order one.
