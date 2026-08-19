@@ -23,6 +23,7 @@ __all__ = [
     "MinimumTransmission",
     "IsolationConstraint",
     "EqualCooperativities",
+    "CooperativityBudget",
     "CustomConstraint",
 ]
 
@@ -123,6 +124,38 @@ class EqualCooperativities(BaseConstraint):
         matrix = ctx.H[:n, :n] if self.block == "normal" else ctx.H[:n, n:]
         magnitudes = jnp.array([jnp.abs(matrix[i, j]) for i, j in self.pairs])
         return jnp.sqrt(self.weight) * (magnitudes - magnitudes[0])
+
+
+@dataclass
+class CooperativityBudget(BaseConstraint):
+    """One-sided cap ``4|H_ij|^2 <= maximum`` on every coupling (Sec. 7.3).
+
+    A hardware statement -- pumps carry finite power -- and the cheapest way to
+    tell a *device* from a *limit point*.  An architecture that meets the target
+    only as ``C -> infinity`` fails at every finite budget and its loss degrades
+    monotonically as the budget tightens; an architecture with a genuine
+    interior solution is indifferent to a loose one.  Tightening the fit
+    tolerance does **not** do this: it just walks further along the diverging
+    ray.
+
+    ``include_detunings`` also caps ``4 Delta_i^2``, which matters when the ray
+    runs a detuning and a squeezing amplitude to infinity together at fixed
+    ratio (the B.10 order-3 case).
+    """
+
+    maximum: float
+    include_detunings: bool = True
+    weight: float = 1.0
+
+    def __call__(self, ctx):
+        n = ctx.num_modes
+        normal = ctx.H[:n, :n]
+        if not self.include_detunings:
+            normal = normal - jnp.diag(jnp.diag(normal))
+        entries = jnp.concatenate([jnp.abs(normal).ravel(),
+                                   jnp.abs(ctx.H[:n, n:]).ravel()])
+        excess = 4.0 * entries ** 2 - self.maximum
+        return jnp.sqrt(self.weight) * jnp.maximum(excess, 0.0)
 
 
 @dataclass

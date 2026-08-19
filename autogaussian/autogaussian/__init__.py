@@ -40,6 +40,7 @@ _jax.config.update("jax_enable_x64", True)
 
 from autogaussian.constraints import (
     CustomConstraint,
+    CooperativityBudget,
     EqualCooperativities,
     IsolationConstraint,
     MinimumTransmission,
@@ -101,7 +102,9 @@ from autogaussian.types import InvalidEntry, Libraries, Verdict
 from autogaussian.postprocess import (
     complexity_table,
     fit_closed_form,
+    parameter_summary,
     rank_architectures,
+    solution_table,
     symbolic_regression,
 )
 from autogaussian.target import CovarianceTarget, P, Pin, X, qidx
@@ -113,14 +116,15 @@ __all__ = [
     "discover", "CovarianceArchitectureOptimizer", "find_minimum_number_auxiliary_modes",
     "CovarianceOracle", "Parametrization", "GraphSpace",
     "TransmissionConstraint", "MinimumTransmission", "IsolationConstraint",
-    "EqualCooperativities", "CustomConstraint",
+    "EqualCooperativities", "CooperativityBudget", "CustomConstraint",
     "response_matrices", "full_response", "output_covariance_quadrature",
     "max_real_eigenvalue", "is_stable",
     "build_H_bdg", "channel_covariance", "vacuum_covariance", "thermal_bath",
     "squeezed_bath", "variance_to_dB", "symplectic_eigenvalues", "duan_sum",
     "characterize_architectures", "min_number_of_pumps", "plot_graph",
     "plot_list_of_graphs", "complexity_table", "rank_architectures",
-    "symbolic_regression", "fit_closed_form",
+    "symbolic_regression", "fit_closed_form", "solution_table",
+    "parameter_summary",
     # two libraries, stability primitives and certificates (Sec. 5, Sec. 6)
     "Verdict", "InvalidEntry", "Libraries",
     "discover_libraries", "escalate", "is_pruning_frontier",

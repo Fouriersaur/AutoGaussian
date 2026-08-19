@@ -109,6 +109,73 @@ The gallery in `autogaussian/gallery.py` ships App. B ready-made: `single_mode_s
 `epr_source`, `directional_squeezed_source`, `broadband_squeezer`, `cv_graph_state`,
 `backaction_evading_readout`, `noise_diode`.
 
+### Frequency-dependent (full-spectrum) targets — App. B.8–B.12
+
+B.1–B.7 pin `σ_out` at a single `Ω`, where the decay ratios `κ̃_i` are inert. `SPECTRAL_GALLERY`
+holds the targets pinned on a *grid*, which is exactly what makes `κ̃_i` live optimisation
+variables (§3, App. A.4(c)):
+
+| target | function | what it exercises | minimum modes found |
+|---|---|---|---|
+| B.8 squeeze-angle rotation (filter cavity) | `squeeze_angle_rotation` | phase-sensitive Nambu cross term `σ_xp(Ω)`; declared squeezed input | 1 (passive, exact) |
+| B.9 bandpass sideband squeezing | `bandpass_squeezer` | a spectral *window*: `Ω_c` ← detuning, `B` ← `κ̃` | 2 |
+| B.10 flat-top order `n` | `flat_top_squeezer` | spectral degree → mode count | 1 (n≤2), 2 (n=3) |
+| B.11 band-limited EPR | `band_limited_epr` | entanglement bandwidth, written on joint quadratures | 3 |
+| B.12 notch (band-stop) squeezing | `notch_squeezer` | a dip needs one resonance, a dip *with a hole* needs the partner | 3 |
+| B.8-imp impure rotation | `impure_rotation` | a prescribed purity spectrum `μ(Ω) ≥ 1` → the intrinsic losses `γ_i` go live | 1 (with `γ₀`) |
+| B.8-nm non-monotone rotation | `non_monotone_rotation` | a turning point in `θ(|Ω|)` → rotation *shape* costs a coupled partner | 2 |
+| B.8-wind prescribed winding | `winding_rotation` | more accumulated sweep than one mode supplies → rotation *magnitude* costs a mode | 2 |
+
+Two conventions these targets rely on:
+
+* **Grids run over `Ω ≥ 0`.** The symmetrised spectrum obeys `V(−Ω) = V(Ω)ᵀ`, so every diagonal
+  entry is automatically even in `Ω`. Pinning `−Ω` is redundant, and pinning a shape that is *not*
+  even asks for something no device can emit.
+* **Shape targets are matched to ~1e-8, not 1e-10.** B.9–B.12 carry
+  `kwargs_optimization={"max_violation_success": 1e-8}` in their `GalleryProblem`; use
+  `problem.optimizer_kwargs(kwargs_optimization={"num_tests": 15})`, which merges rather than
+  replaces. B.8 is exact (residual ~1e-16) because its target is built from the closed form a
+  single detuned lossless mode actually emits.
+
+B.8 doubles as a forward-map golden test: one lossless mode at `Δ/κ = 1/2` reflecting `r`-squeezed
+vacuum returns `det σ_out(Ω) = 1` at every `Ω` with `Ω`-independent ellipse eigenvalues
+`(e^{−2r}, e^{+2r})`, while the axis sweeps `0 → π/2` — depth untouched, angle rotated, as a
+lossless passive element must. `Δ/κ = 1/2` is forced, not chosen: `θ(0) = 0` requires
+`4 arctan(2Δ/κ) = π`. The fit recovers `Δ/κ = 0.500000` and `κ̃ = √2 Ω_c` with no squeezing
+element used at all.
+
+#### The squeeze-angle-rotation family — §8.7 (`ROTATION_FAMILY`)
+
+B.8 asks for a rotating axis at *fixed depth* on a *pure* state. The three extensions each break
+one of those and ask what the break costs. None of them has a closed form to pin from — an
+impure or two-pole rotation is a ratio of quadratics whose angle and purity spectra are the
+symbolic-regression *outputs* of §7.2, never inputs — so they are written as the spectrum of a
+declared **reference device** (`rotation_device` → `rotation_spectrum`), with the prescribed
+quantity *measured* off it by `squeeze_angle`, `rotation_purity` and `accumulated_rotation`. The
+fit never sees the reference, only the pinned numbers.
+
+Three results here are measured, and two of them differ from how §8.7 words the claim:
+
+* **B.8-imp.** A lossless *single* mode is all-pass — it rotates the input ellipse
+  symplectically, so `det σ_out = 1` for every detuning and decay ratio and `μ(Ω) > 1` is out of
+  reach. Freeing `γ₀` fixes it in one parameter (the fit recovers the declared `γ = 0.2`). But
+  "no lossless graph can do it" is *too strong*: a second, still lossless, mode carries its own
+  vacuum input channel and supplies the noise instead, so the two-mode lossless graph does fit.
+  Impurity costs *added noise*; an auxiliary mode is one way to buy it.
+* **B.8-nm.** One detuned mode is strictly monotone in `|Ω|` (single-pole phase — swept over the
+  whole single-mode family, not argued), so a turning point needs two modes. §8.7 attributes it
+  to *opposite-sign detunings*; in this coupled-mode parametrisation the sign of the bare
+  detunings is not what decides it (measured over a wide random sweep, the normal-mode sign rule
+  predicts monotonicity ~70% of the time). What does decide it is **hybridisation**: switch the
+  coupling off and the partner is invisible to the port — the spectra agree to 1e-16 — so the
+  default reference is a same-sign pair with `C^BS ≫` its detunings.
+* **B.8-wind.** The single-mode winding ceiling on `[0, 6κ]` measures **3.013 rad ≈ π**, not
+  `π/2`: the `π/2` of B.8 is that device's useful *in-band* rotation, not its ceiling. So
+  `single_mode_winding_ceiling` finds the threshold by scanning the family, and nothing is
+  hard-coded. Winding past the ceiling *proves* a second mode is needed; the converse is false,
+  and is asserted so nobody turns the ceiling into a budget — the same reference scaled down to
+  1.2 rad of winding still fails on one mode, because its *shape* is what one pole cannot make.
+
 ## The graph lattice
 
 Because the oracle works in the full Nambu structure, a mode **pair carries two independent
@@ -269,6 +336,65 @@ and holding their ratios fixed while lowering `Λ` reproduces the `1/C_bus` erro
 block the same architecture is still found, but only by running the cooperativities up to `~1e5`:
 `asymptotic_bus_modes` adds no solutions, it makes the limit point representable.
 
+## Devices vs limit points: the cooperativity budget
+
+A graph can pass the oracle without being a device: it may meet the target only along a ray
+that runs to infinity, stopping wherever the fit first crosses tolerance. B.10 order 3 is the
+worked case — its cheapest architectures diverge as `C_11 ~ Delta_1^2 -> ∞` at fixed
+`|ν_11|/Δ_1 -> 1`, an auxiliary mode held at its detuned parametric threshold.
+
+Tightening `max_violation_success` does **not** fix this; it walks further along the ray
+(`C_11` = 518 → 1153 → 1373 as the tolerance goes 1e-8 → 1e-9 → 1e-10). Bound the diverging
+knob instead:
+
+```python
+from autogaussian import CooperativityBudget
+optimizer = CovarianceArchitectureOptimizer(
+    target, constraints=(CooperativityBudget(100.0),), ...)
+```
+
+a one-sided hinge `4|H_ij|² ≤ C_max` — pumps carry finite power. A limit point fails at every
+finite budget and its loss degrades as the budget tightens; a genuine device is indifferent:
+
+| architecture | none | C ≤ 100 | C ≤ 25 |
+|---|---|---|---|
+| cheapest order-3 graph | VALID 1.0e-8 | **INVALID** 2.9e-7 | **INVALID** 2.2e-6 |
+| richer order-3 graph | VALID 8.5e-9 | VALID 4.7e-9 | VALID 2.9e-9 |
+
+This doubles as the *detector*: refit under a budget and watch the loss. Two caveats. The
+budget closes the `C, Δ → ∞` ray but not every ray — solutions can run away in `κ̃` instead
+and sit on `log_decay_ratio_bound` (default `κ̃ ≤ 100`), so a full "buildable only" statement
+needs both budgets. And searching under a budget changes the *claim* ("complete within this
+budget") and does not shrink the list: constrained graphs need more elements to stay minimal,
+so B.10 order 3 returns 25 irreducible graphs under `C ≤ 100, κ̃ ≤ 10` against 20 unbounded.
+
+Contrast with §7.3: there the limit is *necessary* (a hardware restriction forces mediation),
+so the ray is reparametrised and kept. Here nothing forces it, so it is excluded. Worked
+through in the B.10 section of `5_spectral_gallery.ipynb`.
+
+## Reading off the discovered devices (§8)
+
+`optimizer.report()` lists the architectures that survived the search. To also get the numbers
+behind them — what a hardware implementation has to dial in — use
+
+```python
+from autogaussian import solution_table, parameter_summary
+
+print(solution_table(optimizer, irreducibles))     # every valid graph + its converged solution
+print(parameter_summary(info, optimizer.space, graph))   # one oracle result, compact
+```
+
+`solution_table` prints, per graph, the complexity/coupling/pump counts, the element list, the
+final loss and stability margin `max Re eig(M̃)`, and then the physical parameters grouped as
+cooperativities `C_ij`, pump phases `arg(g_ij)`/`arg(ν_ij)`, detunings `Δ_i/κ_i`, intrinsic
+losses `γ_i`, decay ratios `κ̃_i` and gauge phases. Options: `limit` (truncate the list), `sort`
+(cheapest first, default), `resolve_missing=True` (re-run the oracle for graphs whose solution
+was not cached). For an asymptotic-bus run the bus couplings appear as the finite ratios of §7.3.
+
+Both helpers read the `parameters` field the oracle already stores on every successful run, so
+they cost nothing extra. All five notebooks now print them for every device they report:
+`solution_table` after each search, `parameter_summary` after each single-graph fit.
+
 ## Construction rules (§7.2)
 
 ```python
@@ -295,6 +421,7 @@ of yours burnt) — the first cell installs the package when it detects Colab:
 | `2_directional_and_broadband.ipynb` | B.3 directionality (aux-mode budget + greedy minimal subgraph), B.4 flat-band squeezer + full BFS over all 3⁶ graphs | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/2_directional_and_broadband.ipynb) |
 | `3_reference_table.ipynb` | the App. F reference table, row by row | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/3_reference_table.ipynb) |
 | `4_gallery_sweep.ipynb` | B.5 nullifiers, B.6 cross-term, B.7 thermal input, with graph plots | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/4_gallery_sweep.ipynb) |
+| `5_spectral_gallery.ipynb` | B.8 squeeze-angle rotation, the rotation family B.8-imp/nm/wind (§8.7), B.9 bandpass, B.10 flat-top order sweep, B.11 band-limited EPR, B.12 notch — spectra plotted against their targets, plus the full §6 discovery for B.8, B.9 and B.10 (those three cells take ~8 min each) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fouriersaur/AutoGaussian/blob/main/autogaussian/5_spectral_gallery.ipynb) |
 
 The badges point at `main` of the public repo; the notebooks also run locally from a clone
 (the install cell falls back to putting the package root on `sys.path`).
@@ -310,12 +437,57 @@ python tests/test_constrained_stability.py # hinge vs value penalty, reduced gra
 python tests/test_search_invariants.py     # two-library invariants, pruning frontier (8)
 python tests/test_certificates.py          # fit-range SDP, passive range, PBH, stubs (9)
 python tests/test_integration.py           # end-to-end libraries + completeness (2)
+python tests/test_gallery_spectral.py      # B.8-B.12 full-spectrum targets, live kappa~ (13)
+python tests/test_gallery_rotation_family.py  # B.8-imp/nm/wind: purity, turning point, winding (15)
 
 python examples/01_discover_squeezers.py        # B.1 + B.2 discovery + construction rules
 python examples/02_directional_and_spectral.py  # B.3 directionality, B.4 flat band
 python examples/03_reference_table.py           # reproduces the App. F reference table
 python examples/04_gallery_sweep.py             # B.5 nullifiers, B.6 cross-term, B.7 thermal input
+python examples/05_spectral_gallery.py          # B.8-B.12 + the B.8-imp/nm/wind rotation family
+python examples/05_spectral_gallery.py --search # + full §6 discovery on B.8, B.9, B.10 (~17 min)
 ```
+
+`05_spectral_gallery.py` runs the whole full-spectrum gallery in ~20 s and prints the mode-count
+ladder for each target — the executable form of "spectral structure costs modes": one mode short
+of the structural minimum the fit never reaches tolerance on any restart (a *provisional*,
+non-condemning INVALID, §6), and adding the mode flips it VALID. `test_gallery_spectral.py`
+asserts the same transitions, plus the `V(−Ω) = V(Ω)ᵀ` convention, the B.8 forward-map golden
+values, and an explicit check that freezing `κ̃` (AUTOSCATTER's choice) *fails* on a spectral
+target. `test_gallery_rotation_family.py` does the same for §8.7: the purity, turning-point and
+winding claims above, each asserted as the feasibility transition rather than an exact mode
+count, plus the two places where the measured behaviour is weaker than §8.7's wording.
+
+### Oracle vs search on a spectral target
+
+Everything above is the **oracle** (§4) on the fully connected graph — *can this many modes do
+it* — which is what the mode-count ladder needs. The **search** (§6) is the breadth-first walk
+down the lattice that returns the two libraries and the *irreducible* graphs, and on a spectral
+target it is expensive: one oracle call costs ~1 s against ~10 ms for a single-point target, and
+a 2-mode lattice holds `3⁶ = 729` graphs.
+
+| target | modes | slots | full BFS | irreducibles | uncertified |
+|---|---|---|---|---|---|
+| B.8 | 1 | 2 | 0.9 s, 4 calls | **1** — `detuning Δ₀`, complexity 1 | 3 |
+| B.9 | 2 | 6 | 485 s, 313 calls | 11, complexity 6–7 | 269 |
+| B.10 n=2 | 1 | 2 | 0.8 s, 4 calls | **1** — `detuning Δ₀ + on-site sqz 0 (real)` | 2 |
+| B.10 n=3 | 2 | 6 | 327 s, 305 calls | 20, cheapest complexity 4 | 160 |
+| B.11, B.12 | 3 | 12 | `3¹² ≈ 5×10⁵`, out of reach | — | — |
+
+Three results worth reading off. B.8's minimal device contains **no squeezing element at all** —
+a bare detuned passive mode, with all the squeezing supplied by the declared `σ_in`; the lattice
+walk found that unaided. Every one of B.9's 11 irreducible graphs carries **two** squeezing
+elements, which turns "one resonance cannot make this window" from an observation about a
+stalled fit into a structural statement. And B.10's two searches are the degree bound stated on
+*minimal* graphs rather than fully connected ones: order 2 is one detuned mode with a single
+real on-site squeezer (complexity 2), order 3 needs two modes and complexity 4 at its cheapest.
+
+Note the last column. On a spectral target almost every rejection lands `certified=False`
+(`sos_no_hurwitz` is a stub and the fit-range SDP rarely fires on a grid), so B.9's honest
+completeness statement is *complete up to at most 269 false negatives* — a much weaker claim
+than the single-point targets of examples 01–04 support. That count is the deliverable, not a
+blemish to hide (§8). For B.11/B.12 use `greedy_minimal_subgraph` / `minimal_valid_subgraphs`
+below the fully connected graph instead of a full BFS.
 
 `04_gallery_sweep.py` covers the three gallery targets that exercise machinery nothing else
 touches: `pin_form` quadratic-form pins (B.5), a lone pinned cross-term (B.6), and a declared

@@ -25,6 +25,8 @@ __all__ = [
     "sweep_target_parameter",
     "fit_closed_form",
     "symbolic_regression",
+    "solution_table",
+    "parameter_summary",
 ]
 
 
@@ -200,3 +202,132 @@ def symbolic_regression(optimizer, graph, symbol, values, relative_tolerance=1.0
             continue
         rules[key] = fit_closed_form(t, series, relative_tolerance=relative_tolerance)
     return {"sweep": t, "dataset": dataset, "rules": rules}
+
+
+# --------------------------------------------------------------------------
+# 7.1 / Sec. 8 reporting -- the discovered devices *with* their parameters
+# --------------------------------------------------------------------------
+
+def _partner_cooperativity(phase_key):
+    """The cooperativity a pump phase belongs to (``arg(nu_{i,j})`` ->
+    ``C_{i,i}`` / ``C^{SQZ}_{i,j}``, ``arg(g_{i,j})`` -> ``C^{BS}_{i,j}``)."""
+    if not phase_key.startswith("arg("):
+        return None
+    body = phase_key[4:-1]
+    kind, _, indices = body.partition("_")
+    i, j = indices.strip("{}").split(",")
+    if kind == "g":
+        return "C^{BS}_{%s,%s}" % (i, j)
+    return "C_{%s,%s}" % (i, j) if i == j else "C^{SQZ}_{%s,%s}" % (i, j)
+
+
+def _live_entries(report, section, threshold):
+    """Entries of one section that describe an element the solution actually
+    uses.  A phase whose coupling came out zero is graph-reduction residue and
+    is dropped, so the printed parameters match the printed architecture."""
+    entries = {key: value for key, value in report[section].items()
+               if abs(value) > threshold}
+    if section != "phases":
+        return entries
+    live = {key for key, value in report["cooperativities"].items()
+            if abs(value) > threshold}
+    return {key: value for key, value in entries.items()
+            if _partner_cooperativity(key) in live}
+
+
+def solution_table(optimizer, graphs=None, limit=None, sort=True,
+                   resolve_missing=False, num_tests=30):
+    """Human-readable table of valid graphs **and** the parameters the oracle
+    converged to for each of them.
+
+    ``optimizer.report()`` lists the architectures; this adds the physical
+    solution behind every architecture -- cooperativities, pump phases,
+    detunings, decay ratios and intrinsic losses -- i.e. the numbers a
+    hardware implementation actually needs.
+
+    Parameters
+    ----------
+    optimizer : CovarianceArchitectureOptimizer
+    graphs : sequence of graph vectors, optional
+        Defaults to ``optimizer.valid_combinations`` (the irreducible list).
+    limit : int, optional
+        Only print this many graphs (the rest are counted in one line).
+    sort : bool
+        Order by complexity (cheapest device first).
+    resolve_missing : bool
+        Re-run the oracle for graphs whose solution was not cached (a graph
+        proved valid inside a sub-library keeps its solution, but a graph that
+        was only ever *inherited* may not have one).
+    num_tests : int
+        Restarts used by ``resolve_missing``.
+
+    Returns
+    -------
+    str
+    """
+    graphs = optimizer.valid_combinations if graphs is None else graphs
+    graphs = [np.asarray(graph, dtype="int8") for graph in graphs]
+    if not graphs:
+        return "no valid graph"
+
+    order = list(range(len(graphs)))
+    if sort:
+        order.sort(key=lambda idx: (int(np.sum(graphs[idx])), idx))
+
+    info = complexity_table([graphs[idx] for idx in order], optimizer.space)
+    lines = ["%i valid graph(s), with the converged parameters:" % len(graphs)]
+    shown = order if limit is None else order[:limit]
+
+    for rank, idx in enumerate(shown):
+        graph = graphs[idx]
+        solution = optimizer.solution_of(graph)
+        if solution is None and resolve_missing:
+            success, infos = optimizer.test_graph(graph, num_tests=num_tests)
+            solution = infos[-1] if success else None
+        lines.append("")
+        lines.append("#%i  complexity=%i  couplings=%i  pumps=%i"
+                     % (rank, info["complexity"][rank], info["num_couplings"][rank],
+                        info["min_number_of_pumps"][rank]))
+        for element in optimizer.space.describe(graph):
+            lines.append("      " + element)
+        if solution is None:
+            lines.append("      (no cached solution; pass resolve_missing=True)")
+            continue
+        lines.append("      loss=%.2e   max Re eig(M~)=%+.4f"
+                     % (solution["loss_reached"], solution["max_real_eigenvalue"]))
+        report = solution["parameters"]
+        for section in ("cooperativities", "phases", "detunings",
+                        "intrinsic_losses", "decay_ratios", "gauge_phases"):
+            entries = _live_entries(report, section, 1.0e-9)
+            if not entries:
+                continue
+            lines.append("      %s:" % section)
+            for key, value in entries.items():
+                lines.append("         %-20s %+.4f" % (key, value))
+
+    if limit is not None and len(order) > limit:
+        lines.append("")
+        lines.append("... and %i more graph(s)" % (len(order) - limit))
+    return "\n".join(lines)
+
+
+def parameter_summary(info, space=None, graph=None, indent="   ", threshold=1.0e-9):
+    """Compact one-line-per-section view of a single converged solution.
+
+    ``info`` is an oracle result dict (as returned by ``test_graph`` /
+    ``solution_of``).  Pass ``space`` and ``graph`` to prefix the architecture
+    the numbers belong to.
+    """
+    lines = []
+    if space is not None and graph is not None:
+        lines.append("%sgraph: %s" % (indent, ", ".join(space.describe(graph))))
+    lines.append("%sloss=%.2e   max Re eig(M~)=%+.4f"
+                 % (indent, info["loss_reached"], info["max_real_eigenvalue"]))
+    for section in info["parameters"]:
+        entries = _live_entries(info["parameters"], section, threshold)
+        if not entries:
+            continue
+        lines.append("%s%-16s %s"
+                     % (indent, section + ":",
+                        "  ".join("%s=%+.4f" % item for item in entries.items())))
+    return "\n".join(lines)
