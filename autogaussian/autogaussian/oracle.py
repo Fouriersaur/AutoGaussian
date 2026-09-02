@@ -94,6 +94,11 @@ class CovarianceOracle:
     sigma_in_signal : (2N, 2N) array, optional
         Declared input covariance of the signal channels (vacuum if omitted).
         *Declared, not optimised* (Sec. 1.2).
+    sigma_in_noise : (2N, 2N) array or callable, optional
+        Declared input covariance of the *intrinsic-loss* channels (vacuum if
+        omitted).  A thermal block here is a hot bath on the corresponding
+        channel; it reaches ``sigma_out`` only through ``N sigma_in_noise
+        N^dag`` (App. B.3(h)).  Also declared, not optimised.
     constraints : sequence of :class:`autogaussian.constraints.BaseConstraint`
         Extra equality constraints ``f_j = 0``; part of the **fit**, i.e. of the
         hard constraint, not of the objective.
@@ -116,6 +121,7 @@ class CovarianceOracle:
         parametrization,
         target,
         sigma_in_signal=None,
+        sigma_in_noise=None,
         constraints=(),
         stability_margin=1.0e-3,
         hinge_weight=1.0,
@@ -146,13 +152,34 @@ class CovarianceOracle:
         elif callable(sigma_in_signal):
             sigma_in_signal = sigma_in_signal(self.num_modes)
         self.sigma_in_signal = jnp.asarray(sigma_in_signal, dtype=jnp.complex128)
-        self.sigma_in_total = stack_input_covariance(self.sigma_in_signal, self.num_modes)
+        if sigma_in_noise is None:
+            sigma_in_noise = vacuum_covariance(self.num_modes)
+        elif callable(sigma_in_noise):
+            sigma_in_noise = sigma_in_noise(self.num_modes)
+        self.sigma_in_noise = jnp.asarray(sigma_in_noise, dtype=jnp.complex128)
+        self.sigma_in_total = stack_input_covariance(
+            self.sigma_in_signal, self.num_modes, sigma_noise=self.sigma_in_noise)
 
         self._compile()
 
     # ------------------------------------------------------------------ #
     # forward map wrappers
     # ------------------------------------------------------------------ #
+
+    @property
+    def channel_occupations(self):
+        """Thermal occupation ``n_k`` read back off the declared noise block.
+
+        ``n_k = (sigma_in_noise[k, k] - 1)/2``; all zeros for the cold (vacuum)
+        default.  Certificates use it to notice that a bath was declared.
+        """
+        diagonal = np.real(np.diag(np.asarray(self.sigma_in_noise)))[: self.num_modes]
+        return 0.5 * (diagonal - 1.0)
+
+    @property
+    def has_hot_channel(self):
+        return bool(np.any(self.channel_occupations > 0.0))
+
 
     def _thetas_full(self, x):
         thetas = self.param.thetas(x)

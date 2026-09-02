@@ -36,6 +36,7 @@ __all__ = [
     "REASON_FIT_RANGE",
     "REASON_PBH",
     "REASON_PASSIVE",
+    "REASON_BATH",
 ]
 
 REASON_FIT = "fit"                  # provisional: the fit tolerance was not met
@@ -45,6 +46,7 @@ REASON_DEFAULT = "default"          # escalated, nothing fired
 REASON_FIT_RANGE = "fit_range"      # certified: target outside the graph's range
 REASON_PBH = "pbh_dark_mode"        # certified: structurally non-stabilizable
 REASON_PASSIVE = "passive_range"    # certified: passive graph cannot squeeze
+REASON_BATH = "bath_unhosted"       # certified: no live channel carries the declared bath
 
 
 class Verdict(Enum):

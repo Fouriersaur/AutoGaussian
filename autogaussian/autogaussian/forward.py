@@ -34,6 +34,8 @@ __all__ = [
     "full_response",
     "output_covariance_nambu",
     "output_covariance_quadrature",
+    "noise_response_block",
+    "noise_response_amplitude",
     "dynamical_matrix",
     "max_real_eigenvalue",
     "is_stable",
@@ -91,21 +93,81 @@ def output_covariance_nambu(S_cal, sigma_in_total):
 
 
 def output_covariance_quadrature(
-    H, gamma, kappa_tilde, Omega, sigma_in_signal, thetas, num_ports=None
+    H, gamma, kappa_tilde, Omega, sigma_in_signal, thetas, num_ports=None,
+    sigma_in_noise=None,
 ):
     """Full Sec.-3 chain: graph parameters -> ``V(Omega)`` in the interleaved
     quadrature basis ``(x_1, p_1, x_2, p_2, ...)``, restricted to the first
     ``num_ports`` modes (the monitored signal ports).
+
+    ``sigma_in_noise`` declares the covariance of the intrinsic-loss channels
+    (vacuum if omitted); a thermal block there is what makes a designated loss
+    channel hot.
     """
     num_modes = H.shape[0] // 2
     S_cal = full_response(H, gamma, kappa_tilde, Omega)
-    sigma_in_total = stack_input_covariance(sigma_in_signal, num_modes)
+    sigma_in_total = stack_input_covariance(sigma_in_signal, num_modes,
+                                            sigma_noise=sigma_in_noise)
     sigma_out = output_covariance_nambu(S_cal, sigma_in_total)
     W = quadrature_matrix(thetas, num_modes)
     V = nambu_to_quadrature(sigma_out, W)
     if num_ports is None:
         return V
     return V[: 2 * num_ports, : 2 * num_ports]
+
+
+# ---------------------------------------------------------------------------
+# read-only diagnostic: the noise susceptibility hot channel -> monitored port
+# ---------------------------------------------------------------------------
+
+def noise_response_block(H, gamma, kappa_tilde, Omega, port, channel, thetas=None):
+    """The 2x2 quadrature sub-block of ``N(Omega)`` from intrinsic-loss channel
+    ``channel`` into monitored ``port`` -- i.e. ``N_{j,k*}(Omega)`` of App.
+    B.3(h).
+
+    This is the object that governs how much of a hot bath reaches the
+    monitored port: turning channel ``k*`` from vacuum to occupation ``n``
+    inflates the port-``j`` quadrature block by
+
+        d sigma_out,jj = 2 n * [ N e_{k*} N^dag ]_{jj-block} .
+
+    **Diagnostic only.**  It is deliberately *not* a fit term: whether purity is
+    recovered by driving this block to zero (noise evasion) or by some other
+    mechanism is a question to measure, not to assume.
+
+    Returns the real 2x2 matrix ``[[xx, xp], [px, pp]]`` of the contribution
+    ``[ N e_{k*} N^dag ]`` in the quadrature basis, i.e. the *per-unit-``2n``*
+    inflation of the port block.
+    """
+    num_modes = H.shape[0] // 2
+    _, N = response_matrices(H, gamma, kappa_tilde, Omega)
+    if thetas is None:
+        thetas = jnp.zeros(num_modes)
+    W = quadrature_matrix(thetas, num_modes)
+
+    channel = int(channel)
+    selector = jnp.zeros((2 * num_modes, 2 * num_modes), dtype=jnp.complex128)
+    selector = selector.at[channel, channel].set(1.0)
+    selector = selector.at[channel + num_modes, channel + num_modes].set(1.0)
+
+    contribution = N @ selector @ jnp.conj(N).T
+    block = nambu_to_quadrature(contribution, W)
+    rows = slice(2 * int(port), 2 * int(port) + 2)
+    return jnp.real(block[rows, rows])
+
+
+def noise_response_amplitude(H, gamma, kappa_tilde, Omega, port, channel):
+    """The raw Nambu amplitudes ``N[port, channel]`` and ``N[port, channel+N]``
+    -- the normal and anomalous parts of the hot-channel susceptibility.
+
+    ``noise_response_block`` is the physically meaningful (gauge-covariant)
+    object; this one is handy when the question is *which* Nambu path carries
+    the bath.
+    """
+    num_modes = H.shape[0] // 2
+    _, N = response_matrices(H, gamma, kappa_tilde, Omega)
+    port, channel = int(port), int(channel)
+    return N[port, channel], N[port, channel + num_modes]
 
 
 # ---------------------------------------------------------------------------

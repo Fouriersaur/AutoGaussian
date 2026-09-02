@@ -43,13 +43,18 @@ from autogaussian.constraints import (
     CooperativityBudget,
     EqualCooperativities,
     IsolationConstraint,
+    MinimumIntrinsicLoss,
     MinimumTransmission,
+    PurityFloor,
+    QuadratureSpectrum,
     TransmissionConstraint,
 )
 from autogaussian.forward import (
     full_response,
     is_stable,
     max_real_eigenvalue,
+    noise_response_amplitude,
+    noise_response_block,
     output_covariance_quadrature,
     response_matrices,
 )
@@ -67,6 +72,7 @@ from autogaussian.nambu import (
     squeezed_bath,
     symplectic_eigenvalues,
     thermal_bath,
+    thermal_channel_covariance,
     vacuum_covariance,
     variance_to_dB,
 )
@@ -75,7 +81,9 @@ from autogaussian.optimizer import (
     find_minimum_number_auxiliary_modes,
 )
 from autogaussian.certificates import (
+    certify_bath_unhosted,
     certify_fit_infeasible,
+    certify_hot_purity_obstruction,
     certify_no_hurwitz,
     certify_passive_range,
     certify_target_unphysical,
@@ -117,9 +125,12 @@ __all__ = [
     "CovarianceOracle", "Parametrization", "GraphSpace",
     "TransmissionConstraint", "MinimumTransmission", "IsolationConstraint",
     "EqualCooperativities", "CooperativityBudget", "CustomConstraint",
+    "PurityFloor", "QuadratureSpectrum", "MinimumIntrinsicLoss",
     "response_matrices", "full_response", "output_covariance_quadrature",
+    "noise_response_block", "noise_response_amplitude",
     "max_real_eigenvalue", "is_stable",
     "build_H_bdg", "channel_covariance", "vacuum_covariance", "thermal_bath",
+    "thermal_channel_covariance",
     "squeezed_bath", "variance_to_dB", "symplectic_eigenvalues", "duan_sum",
     "characterize_architectures", "min_number_of_pumps", "plot_graph",
     "plot_list_of_graphs", "complexity_table", "rank_architectures",
@@ -132,6 +143,7 @@ __all__ = [
     "rightmost_eigenpair", "eigenvalue_condition_number", "gradient_sampling",
     "is_hurwitz",
     "certify_fit_infeasible", "certify_no_hurwitz", "certify_passive_range",
+    "certify_bath_unhosted", "certify_hot_purity_obstruction",
     "certify_target_unphysical", "pbh_dark_mode", "pbh_non_stabilizable",
     "sos_no_hurwitz", "lyapunov_feasible",
 ]

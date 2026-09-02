@@ -40,13 +40,20 @@ from autogaussian.graph import (
     SLOT_ONSITE_SQUEEZING,
     SLOT_TWO_MODE_SQUEEZING,
 )
-from autogaussian.types import REASON_FIT_RANGE, REASON_PASSIVE, REASON_PBH
+from autogaussian.types import (
+    REASON_BATH,
+    REASON_FIT_RANGE,
+    REASON_PASSIVE,
+    REASON_PBH,
+)
 
 __all__ = [
     "certify_fit_infeasible",
     "certify_no_hurwitz",
     "certify_target_unphysical",
     "certify_passive_range",
+    "certify_bath_unhosted",
+    "certify_hot_purity_obstruction",
     "pbh_dark_mode",
     "pbh_non_stabilizable",
     "sos_no_hurwitz",
@@ -163,38 +170,136 @@ def _is_passive(graph, space):
     return True
 
 
+def _is_vacuum(matrix):
+    matrix = np.asarray(matrix)
+    return bool(np.allclose(matrix, np.eye(matrix.shape[0]), atol=1e-12))
+
+
+def _port_of(index):
+    """Which port a quadrature index belongs to."""
+    return int(index) // 2
+
+
+def _pin_value(pin):
+    """The numeric value of a pin, or ``None`` if it still carries free symbols."""
+    import sympy as sp
+
+    value = pin.value
+    if isinstance(value, sp.Expr):
+        if value.free_symbols:
+            return None
+        return complex(sp.N(value))
+    return complex(value)
+
+
+def _passive_isotropic_violation(optimizer, tolerance):
+    """Passive graph + baths without anomalous correlations: what is unreachable?
+
+    A passive network has an empty anomalous block of ``H_BdG``, so ``S`` and
+    ``N`` are block diagonal in Nambu space.  If no *input* carries anomalous
+    correlations either (thermal baths have ``m = 0``), the anomalous block of
+    ``sigma_out`` is zero at every frequency and for every parameter choice.
+    That forces each monitored port block to be **isotropic**,
+
+        V_jj(Omega) = c_j(Omega) * 1_2 ,   c_j real,
+
+    with ``c_j`` free.  Anything the target asks for beyond that -- a nonzero
+    ``x``/``p`` correlation inside a port, two different values for ``sigma_xx``
+    and ``sigma_pp`` of the same port, or a squeezed eigenvalue pair -- is
+    unreachable whatever the optimiser does.
+
+    This is the thermal generalisation of the exact-vacuum argument: hot loss
+    channels enlarge the reachable set (``c_j`` grows) but cannot tilt it.
+    """
+    # (a) squeezing asked for through a gauge-free spectrum constraint
+    for constraint in getattr(optimizer.oracle, "constraints", []):
+        eigenvalues = getattr(constraint, "eigenvalues", None)
+        if eigenvalues is None:
+            continue
+        lo, hi = float(eigenvalues[0]), float(eigenvalues[1])
+        if abs(hi - lo) > tolerance:
+            return {"test": "passive_output_is_isotropic",
+                    "constraint": str(constraint),
+                    "reachable": "eigenvalues equal (isotropic block)",
+                    "requested": (lo, hi)}
+
+    # (b) squeezing asked for through the pins themselves
+    diagonal = {}
+    for pin in optimizer.target.pins:
+        if pin.form is not None or pin.order > 0:
+            continue
+        value = _pin_value(pin)
+        if value is None:
+            continue
+        port_row, port_col = _port_of(pin.row), _port_of(pin.col)
+        if port_row != port_col:
+            continue                       # cross-port entries stay free
+        if pin.row != pin.col:
+            if abs(value) > tolerance:     # V_xp inside a port is identically 0
+                return {"test": "passive_has_no_intra_port_xp_correlation",
+                        "pin": str(pin), "reachable_value": 0.0,
+                        "pinned_value": value}
+            continue
+        key = (port_row, float(pin.omega))
+        previous = diagonal.get(key)
+        if previous is not None and abs(previous[0] - value) > tolerance:
+            return {"test": "passive_port_block_is_isotropic",
+                    "pin": str(pin), "other_pin": previous[1],
+                    "pinned_values": (previous[0], value)}
+        diagonal[key] = (value, str(pin))
+    return None
+
+
 def certify_passive_range(optimizer, graph, tolerance=1.0e-9):
     """Graph-dependent range certificate for a passive device.
 
     A network built only from beam-splitters and detunings implements a passive
-    (number-conserving) Gaussian channel.  Fed with vacuum on every input --
-    signal ports, auxiliaries and intrinsic-loss channels alike -- its output is
-    vacuum at *every* frequency, for *every* value of the couplings: the
-    anomalous block of ``H_BdG`` is empty, so no parameter choice can populate
-    the anomalous block of ``sigma_out``.  Any pin that vacuum does not already
-    satisfy is therefore unreachable for this graph, whatever the optimiser
-    does.
+    (number-conserving) Gaussian channel.  Two rungs, depending on what the
+    channels are fed with:
 
-    Only fires when the declared input covariance is vacuum; a squeezed input
-    makes the reachable set bigger and the argument no longer applies.
+    * **All inputs vacuum** -- signal ports, auxiliaries *and* intrinsic-loss
+      channels.  The output is vacuum at every frequency for every value of the
+      couplings, so any pin vacuum does not already satisfy is unreachable.
+    * **Signal ports vacuum, some loss channel thermal.**  The output is no
+      longer vacuum -- a hot bath heats the ports -- but it still carries no
+      anomalous correlations, so every port block stays isotropic
+      ``c_j * 1_2``.  Squeezing (a split eigenvalue pair, or an intra-port
+      ``x``/``p`` correlation) remains unreachable; see
+      :func:`_passive_isotropic_violation`.
+
+    A *squeezed* input makes the reachable set genuinely bigger and neither
+    argument applies.
     """
-    import sympy as sp
-
     space = optimizer.space
     if not _is_passive(graph, space):
         return False, {"reason": "not_passive", "conclusive": False}
 
     sigma_in = np.asarray(optimizer.oracle.sigma_in_signal)
-    if not np.allclose(sigma_in, np.eye(sigma_in.shape[0]), atol=1e-12):
+    if not _is_vacuum(sigma_in):
         return False, {"reason": "non_vacuum_input", "conclusive": False}
+
+    sigma_noise = np.asarray(getattr(optimizer.oracle, "sigma_in_noise",
+                                     np.eye(sigma_in.shape[0])))
+    num_modes = sigma_noise.shape[0] // 2
+    anomalous = sigma_noise[:num_modes, num_modes:]
+    if not np.allclose(anomalous, 0.0, atol=1e-12):
+        # a squeezed loss channel can populate the anomalous output block
+        return False, {"reason": "squeezed_noise_channel", "conclusive": False}
+
+    if not _is_vacuum(sigma_noise):
+        # hot (but not squeezed) loss channels: the weaker isotropy argument
+        detail = _passive_isotropic_violation(optimizer, tolerance)
+        if detail is not None:
+            return True, dict(detail, reason=REASON_PASSIVE, conclusive=True)
+        return False, {"reason": "isotropic_output_satisfies_all_pins",
+                       "conclusive": False}
 
     num_ports = optimizer.num_ports
     vacuum = np.eye(2 * num_ports)
     for pin in optimizer.target.pins:
-        value = pin.value
-        if isinstance(value, sp.Expr) and value.free_symbols:
+        value = _pin_value(pin)
+        if value is None:
             continue
-        value = complex(sp.N(value)) if isinstance(value, sp.Expr) else complex(value)
         if pin.order > 0:
             reached = 0.0                            # vacuum is frequency independent
         elif pin.form is not None:
@@ -207,7 +312,141 @@ def certify_passive_range(optimizer, graph, tolerance=1.0e-9):
                           "test": "passive_maps_vacuum_to_vacuum",
                           "pin": str(pin), "reachable_value": complex(reached),
                           "pinned_value": value}
+    # the pins are all satisfied by vacuum, but a constraint may still ask for
+    # squeezing (the gauge-free spectrum pins of the hot-channel target)
+    detail = _passive_isotropic_violation(optimizer, tolerance)
+    if detail is not None:
+        return True, dict(detail, reason=REASON_PASSIVE, conclusive=True)
     return False, {"reason": "vacuum_satisfies_all_pins", "conclusive": False}
+
+
+# ---------------------------------------------------------------------------
+# rung 1c -- the declared bath has no channel to live on
+# ---------------------------------------------------------------------------
+
+def certify_bath_unhosted(optimizer, graph=None, tolerance=1.0e-12):
+    """Fires when a hot bath is declared on a channel that does not exist.
+
+    An intrinsic-loss channel enters the forward map through
+    ``N = chi sqrt(gamma)``.  If mode ``k*`` has no *live* ``gamma_k`` -- the
+    parametrisation freezes it at zero for the whole family, because
+    ``intrinsic_losses`` is off for that mode -- then column ``k*`` of ``N`` is
+    identically zero and the declared bath never reaches the device at all.
+    No graph in the family hosts it, so the posed problem is not the problem
+    being solved.
+
+    This is a *configuration* statement, not a graph one: it fires for every
+    graph or for none.  It is cheap and conclusive, and it is the reason the
+    hot-channel target makes the hot mode's intrinsic loss a live variable.
+    """
+    oracle = optimizer.oracle
+    occupations = np.asarray(getattr(oracle, "channel_occupations",
+                                     np.zeros(optimizer.num_modes)))
+    hot = np.where(occupations > tolerance)[0]
+    if hot.size == 0:
+        return False, {"reason": "no_bath_declared", "conclusive": False}
+
+    live = np.asarray(optimizer.param.intrinsic_losses, dtype=bool)
+    unhosted = [int(k) for k in hot if not live[k]]
+    if unhosted:
+        return True, {"reason": REASON_BATH, "conclusive": True,
+                      "test": "declared_bath_has_no_live_loss_channel",
+                      "channels": unhosted,
+                      "occupations": [float(occupations[k]) for k in unhosted]}
+    return False, {"reason": "bath_is_hosted", "conclusive": False}
+
+
+# ---------------------------------------------------------------------------
+# rung 1d -- a hot channel that reaches the monitored port forbids purity
+# ---------------------------------------------------------------------------
+
+def certify_hot_purity_obstruction(optimizer, graph=None, tolerance=1.0e-12):
+    """Purity at the monitored port is unreachable if the hot bath can reach it.
+
+    Split the output covariance by input block.  With the loss channels at
+    ``sigma_noise = 1 + 2 n e_k`` the monitored port block is
+
+        sigma_out,jj = A + B ,
+        A = ( S sigma_signal S^dag + N N^dag )_jj ,
+        B = 2 n [ N e_k N^dag ]_jj .
+
+    ``A`` is exactly the block the *same* device would emit with a cold bath, so
+    it is a physical single-mode covariance and ``det A >= 1`` by the
+    uncertainty principle.  ``B`` is positive semidefinite.  For 2x2 matrices
+
+        det(A + B) = det A + det B + tr(A adj B) >= det A >= 1 ,
+
+    with equality **iff** ``B = 0``, since ``A`` is positive definite and
+    ``adj B = 0`` only for ``B = 0``.  Hence
+
+        det sigma_out,jj = 1   <=>   N_{j,k}(Omega) = 0 ,
+
+    i.e. *the purity floor under a hot bath is exactly the statement that the
+    monitored port evades the hot channel*.  That is a theorem about this
+    forward map, not a conjecture about the mechanism.
+
+    It becomes an **obstruction** whenever the target itself forces
+    ``N_{j,k} != 0``.  ``N = chi sqrt(gamma)`` and, for ``j != k``,
+    ``S_{jk} = chi_{jk}``; so a pinned nonzero transmission ``|S_{jk}|^2 = t > 0``
+    together with a floored loss ``gamma_k >= gamma_min > 0`` gives
+    ``|N_{jk}|^2 = t gamma_k > 0`` at every parameter point.  No graph, at any
+    mode count, can then hold ``det = 1``: the search is answering an
+    unanswerable question and should be told so before it starts.
+
+    Fires only when all four ingredients are declared: a hot channel, a purity
+    floor on port ``j``, a positive lower bound on ``gamma_k``, and a positive
+    lower bound on ``|S_{jk}|^2`` at the same frequency.
+    """
+    oracle = optimizer.oracle
+    occupations = np.asarray(getattr(oracle, "channel_occupations",
+                                     np.zeros(optimizer.num_modes)))
+    hot = [int(k) for k in np.where(occupations > tolerance)[0]]
+    if not hot:
+        return False, {"reason": "no_bath_declared", "conclusive": False}
+
+    constraints = list(getattr(oracle, "constraints", []))
+    purity = [c for c in constraints
+              if type(c).__name__ == "PurityFloor" and abs(c.value - 1.0) <= tolerance]
+    if not purity:
+        return False, {"reason": "no_purity_floor", "conclusive": False}
+
+    loss_floor = {}
+    for c in constraints:
+        if type(c).__name__ == "MinimumIntrinsicLoss" and c.minimum > tolerance:
+            loss_floor[int(c.mode)] = max(loss_floor.get(int(c.mode), 0.0),
+                                          float(c.minimum))
+
+    transmission = []
+    for c in constraints:
+        name = type(c).__name__
+        if name == "TransmissionConstraint" and c.value > tolerance:
+            transmission.append((int(c.port_out), int(c.port_in), float(c.value),
+                                 float(c.omega), str(c)))
+        elif name == "MinimumTransmission" and c.minimum > tolerance:
+            transmission.append((int(c.port_out), int(c.port_in), float(c.minimum),
+                                 float(c.omega), str(c)))
+
+    for floor in purity:
+        j = int(floor.port)
+        for k in hot:
+            if k == j or k not in loss_floor:
+                continue
+            for out, inp, value, omega, text in transmission:
+                if out != j or inp != k or abs(omega - float(floor.omega)) > 1e-12:
+                    continue
+                return True, {
+                    "reason": REASON_FIT_RANGE, "conclusive": True,
+                    "test": "hot_channel_reaches_monitored_port",
+                    "monitored_port": j, "hot_channel": k,
+                    "occupation": float(occupations[k]),
+                    "gamma_min": loss_floor[k],
+                    "transmission": value,
+                    "omega": float(floor.omega),
+                    "bound": "|N_{j,k}|^2 >= %.6g > 0  =>  det sigma_out,jj > 1"
+                             % (value * loss_floor[k]),
+                    "forcing_constraint": text,
+                }
+    return False, {"reason": "hot_channel_not_forced_onto_port", "conclusive": False}
 
 
 def certify_fit_infeasible(optimizer, graph, solver=None, verbose=False, cache=None):
@@ -218,6 +457,16 @@ def certify_fit_infeasible(optimizer, graph, solver=None, verbose=False, cache=N
     so its result is memoised in ``cache`` and the SDP is solved once per run.
     Returns ``(fired, detail)``.
     """
+    fired, detail = certify_bath_unhosted(optimizer, graph)
+    if fired:
+        return True, detail
+    bath_detail = detail
+
+    fired, detail = certify_hot_purity_obstruction(optimizer, graph)
+    if fired:
+        return True, detail
+    hot_detail = detail
+
     fired, detail = certify_passive_range(optimizer, graph)
     if fired:
         return True, detail
@@ -232,6 +481,8 @@ def certify_fit_infeasible(optimizer, graph, solver=None, verbose=False, cache=N
         if cache is not None:
             cache["target_unphysical"] = (fired, detail)
     detail["passive_test"] = passive_detail
+    detail["bath_test"] = bath_detail
+    detail["hot_purity_test"] = hot_detail
     return fired, detail
 
 

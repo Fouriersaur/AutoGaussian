@@ -52,6 +52,7 @@ __all__ = [
     "thermal_bath",
     "squeezed_bath",
     "stack_input_covariance",
+    "thermal_channel_covariance",
     "duan_sum",
     "symplectic_eigenvalues",
     "variance_to_dB",
@@ -166,12 +167,42 @@ def squeezed_bath(r, phi=0.0):
     return n, complex(m)
 
 
-def stack_input_covariance(sigma_signal, num_modes):
-    """``sigma_in = blockdiag(signal inputs, vacuum)`` for the combined input
-    vector ``(a^in, a^noise)`` of the response ``S_cal = [S | N]`` (Sec. 3)."""
+def stack_input_covariance(sigma_signal, num_modes, sigma_noise=None):
+    """``sigma_in = blockdiag(signal inputs, intrinsic-loss channels)`` for the
+    combined input vector ``(a^in, a^noise)`` of the response
+    ``S_cal = [S | N]`` (Sec. 3).
+
+    ``sigma_noise`` is the declared covariance of the *intrinsic-loss* channels
+    and defaults to vacuum -- the cold-bath convention every other target in the
+    gallery uses.  Passing a thermal block ``diag(2 n + 1)`` is what makes a
+    designated loss channel *hot* (App. B.3(h)); it enters ``sigma_out`` only
+    through the second term ``N sigma_noise N^dag``.
+    """
     z = jnp.zeros((2 * num_modes, 2 * num_modes), dtype=jnp.complex128)
-    vac = vacuum_covariance(num_modes)
-    return jnp.block([[sigma_signal, z], [z, vac]])
+    if sigma_noise is None:
+        sigma_noise = vacuum_covariance(num_modes)
+    sigma_noise = jnp.asarray(sigma_noise, dtype=jnp.complex128)
+    return jnp.block([[sigma_signal, z], [z, sigma_noise]])
+
+
+def thermal_channel_covariance(occupations, num_modes):
+    """Nambu covariance of ``num_modes`` independent intrinsic-loss channels,
+    where ``occupations`` says which of them are hot.
+
+    ``occupations`` may be a dict ``{channel: n}``, a sequence (padded with
+    zeros) or a scalar (every channel at that occupation).  Channels not listed
+    stay at vacuum.
+    """
+    n = np.zeros(int(num_modes))
+    if isinstance(occupations, dict):
+        for key, value in occupations.items():
+            n[int(key)] = float(value)
+    elif np.isscalar(occupations):
+        n[:] = float(occupations)
+    else:
+        values = np.asarray(occupations, dtype=float)
+        n[: values.size] = values
+    return channel_covariance(n=n, m=0.0, num_modes=int(num_modes))
 
 
 # ---------------------------------------------------------------------------

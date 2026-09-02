@@ -19,11 +19,19 @@ import jax.numpy as jnp
 
 from autogaussian.constraints import (
     IsolationConstraint,
+    MinimumIntrinsicLoss,
     MinimumTransmission,
+    PurityFloor,
+    QuadratureSpectrum,
     TransmissionConstraint,
 )
 from autogaussian.forward import output_covariance_quadrature
-from autogaussian.nambu import build_H_bdg, channel_covariance, squeezed_bath
+from autogaussian.nambu import (
+    build_H_bdg,
+    channel_covariance,
+    squeezed_bath,
+    thermal_channel_covariance,
+)
 from autogaussian.target import PART_REAL, CovarianceTarget, P, X, qidx
 
 __all__ = [
@@ -31,6 +39,8 @@ __all__ = [
     "single_mode_squeezer",
     "epr_source",
     "directional_squeezed_source",
+    "thermal_directional_squeezer",
+    "hot_channel_inflation",
     "broadband_squeezer",
     "cv_graph_state",
     "backaction_evading_readout",
@@ -68,6 +78,7 @@ __all__ = [
 class GalleryProblem:
     target: CovarianceTarget
     sigma_in_signal: Optional[Callable] = None      # num_modes -> (2N,2N) array
+    sigma_in_noise: Optional[Callable] = None       # num_modes -> (2N,2N) array
     constraints: Sequence[Any] = field(default_factory=tuple)
     notes: str = ""
     suggested: Dict[str, Any] = field(default_factory=dict)
@@ -82,6 +93,7 @@ class GalleryProblem:
         needs (the shape targets B.9-B.12 are matched to ~1e-8, not 1e-10).
         """
         kwargs = {"sigma_in_signal": self.sigma_in_signal,
+                  "sigma_in_noise": self.sigma_in_noise,
                   "constraints": tuple(self.constraints)}
         kwargs.update(self.suggested)
         if self.kwargs_optimization:
@@ -191,6 +203,168 @@ def directional_squeezed_source(variance=0.5, forward_transmission=None,
               "pin so the minimal solution is a single connected device.",
         suggested={"optimize_gauge": False},
     )
+
+
+# --------------------------------------------------------------------------
+# B.3(h) thermal-resilient directional squeezer -- hot intrinsic-loss channel
+# --------------------------------------------------------------------------
+
+def thermal_directional_squeezer(
+    r=0.8,
+    n_thermal=0.5,
+    hot_channel=2,
+    monitored_port=1,
+    vacuum_port=0,
+    forward_transmission=1.3,
+    isolate_backward=True,
+    min_loss=0.1,
+    bandwidth=None,
+    num_band_points=4,
+    intrinsic_losses=None,
+):
+    """Directional squeezer with a **hot intrinsic-loss channel** -- the
+    ``sigma_out(Omega)``-native twin of the "quantum-limited amplifier with a hot
+    output port" problem (AUTOSCATTER Sec. VI).
+
+    The device is the B.3 directional squeezer: ``monitored_port`` emits
+    squeezing of depth ``r``, ``vacuum_port`` sits at vacuum, transport is
+    nonreciprocal.  The new content is the *adversary*: the intrinsic-loss
+    channel of mode ``hot_channel`` is held at thermal occupation
+    ``n_thermal > 0``, and the monitored port is nevertheless required to stay on
+    the purity floor ``det sigma_out = 1``.
+
+    Where the bath enters
+    ---------------------
+    Splitting the output covariance into its signal and noise contributions,
+
+        sigma_out = S sigma_signal S^dag + N sigma_noise N^dag ,
+        N(Omega)  = chi(Omega) sqrt(gamma) ,
+
+    the squeezing lives in the first term and intrinsic-loss channels enter only
+    through the second.  A cold channel contributes the identity; occupation
+    ``n`` on channel ``k*`` inflates the monitored port block by
+
+        d sigma_out,jj(Omega) = 2 n [ N(Omega) e_{k*} N(Omega)^dag ]_{jj} ,
+
+    so the contamination is governed entirely by the susceptibility
+    ``N_{j,k*}(Omega)`` -- the covariance-resolved form of AUTOSCATTER's
+    added-noise sum.  Inspect it with
+    :func:`autogaussian.forward.noise_response_block`; it is deliberately *not*
+    a fit term.
+
+    Conventions and reductions
+    --------------------------
+    * The squeezing is pinned **gauge-free**, as the eigenvalue pair
+      ``(e^{-2r}, e^{+2r})`` of the port block (:class:`QuadratureSpectrum`),
+      not as ``sigma_xx`` / ``sigma_pp`` separately.
+    * ``det sigma_out = 1`` on the *monitored* block is declared explicitly
+      (:class:`PurityFloor`) and is evaluated with the thermal occupation
+      already present -- that is the whole point of the target.
+    * The hot channel must exist *and stay open*: mode ``hot_channel`` gets a
+      live intrinsic loss ``gamma``, floored at ``min_loss``.  The floor is not
+      cosmetic -- with ``min_loss = 0`` the optimiser defeats the bath by
+      sending ``gamma -> 0``, i.e. by disconnecting the channel instead of
+      surviving it, and the target becomes the cold one in disguise.
+    * ``n_thermal = 0, min_loss = 0`` reduces this exactly to the cold B.3
+      directional squeezer with ``variance = e^{-2r}`` (up to the squeeze angle,
+      which the gauge-free pin leaves free).  The honest *baseline* for "what
+      does resilience cost" is instead ``n_thermal = 0`` at the same
+      ``min_loss``: same open loss channel, cold bath.
+
+    Parameters
+    ----------
+    bandwidth : float, optional
+        **Off by default on purpose.**  Holding purity at a single frequency is
+        generic; holding it across a finite band is not.  Only switch this on
+        after a forward-map sweep shows ``det sigma_out(Omega) = 1`` is holdable
+        at several grid points on some graph -- otherwise the band target is a
+        conjecture wearing a fit tolerance.
+    hot_channel : int
+        Which intrinsic-loss channel is held at ``n_thermal``.  Defaults to
+        mode 2, the first auxiliary -- see the obstruction note above before
+        moving it onto a port mode.
+    min_loss : float
+        Floor on the hot channel's intrinsic loss (:class:`MinimumIntrinsicLoss`).
+        Pass ``0.0`` to switch the floor off and reproduce the degenerate
+        ``gamma -> 0`` escape.
+    intrinsic_losses : bool or sequence of bool, optional
+        Which modes carry a live ``gamma``.  Defaults to the hot channel alone.
+    """
+    r = float(r)
+    n_thermal = float(n_thermal)
+    hot_channel = int(hot_channel)
+    monitored_port, vacuum_port = int(monitored_port), int(vacuum_port)
+    if monitored_port == vacuum_port:
+        raise ValueError("monitored and vacuum port must differ")
+
+    if bandwidth is None:
+        omegas = np.array([0.0])
+    else:
+        omegas = _spectral_grid(float(bandwidth), int(num_band_points))
+
+    target = CovarianceTarget(
+        num_ports=2,
+        name="thermal-resilient directional squeezer (n=%.3g on channel %i)"
+             % (n_thermal, hot_channel))
+
+    # port sitting at vacuum -- pinned entry by entry, which also puts every
+    # band frequency into the oracle's frequency set (the constraints below are
+    # evaluated on that set)
+    v0, v1 = qidx(vacuum_port, X), qidx(vacuum_port, P)
+    for omega in omegas:
+        target.pin((v0, v0), 1.0, omega=omega)
+        target.pin((v1, v1), 1.0, omega=omega)
+        target.pin((v0, v1), 0.0, omega=omega)
+        target.pin((v1, v0), 0.0, omega=omega)
+
+    constraints = []
+    for omega in omegas:
+        # squeezing depth, gauge-free ...
+        constraints.append(QuadratureSpectrum.squeezed(monitored_port, r, omega=omega))
+        # ... and the purity floor the hot bath is trying to break
+        constraints.append(PurityFloor(port=monitored_port, omega=omega))
+    if forward_transmission is not None:
+        constraints.append(TransmissionConstraint(port_out=monitored_port,
+                                                  port_in=vacuum_port,
+                                                  value=float(forward_transmission)))
+    if isolate_backward:
+        constraints.append(IsolationConstraint(port_out=vacuum_port,
+                                               port_in=monitored_port))
+    if float(min_loss) > 0.0:
+        constraints.append(MinimumIntrinsicLoss(mode=hot_channel,
+                                                minimum=float(min_loss)))
+
+    if intrinsic_losses is None:
+        intrinsic_losses = [i == hot_channel for i in range(hot_channel + 1)]
+
+    sigma_in_noise = None
+    if n_thermal != 0.0:
+        sigma_in_noise = lambda num_modes: thermal_channel_covariance(
+            {hot_channel: n_thermal}, num_modes)
+
+    return GalleryProblem(
+        target,
+        sigma_in_noise=sigma_in_noise,
+        constraints=tuple(constraints),
+        notes="B.3(h)  directional squeezer whose port-%i-side intrinsic-loss "
+              "channel is held at n = %.3g; the monitored port %i must keep "
+              "depth r = %.3g *and* det sigma_out = 1 despite it."
+              % (vacuum_port, n_thermal, monitored_port, r),
+        suggested={"optimize_gauge": False,
+                   "intrinsic_losses": intrinsic_losses},
+    )
+
+
+def hot_channel_inflation(n_thermal, response_block):
+    """``2 n * [N e_k N^dag]`` -- the predicted inflation of a monitored port
+    block when its designated loss channel goes from vacuum to occupation ``n``.
+
+    ``response_block`` is what
+    :func:`autogaussian.forward.noise_response_block` returns.  Kept next to the
+    target so the demonstration step ("the textbook graph must fail purity on
+    purpose") can be written as one line.
+    """
+    return 2.0 * float(n_thermal) * np.asarray(response_block, dtype=float)
 
 
 # --------------------------------------------------------------------------

@@ -46,6 +46,9 @@ class CovarianceArchitectureOptimizer:
         Number of unmonitored (auxiliary) modes on top of the ``P`` ports.
     sigma_in_signal : array, optional
         Declared input covariance of the signal channels (Sec. 1.2).
+    sigma_in_noise : array or callable, optional
+        Declared input covariance of the intrinsic-loss channels (vacuum by
+        default); a thermal block makes a designated loss channel hot.
     intrinsic_losses : bool or sequence of bool
         Modes carrying a free intrinsic loss ``gamma_i``.
     free_decay_ratios : bool or sequence of bool
@@ -72,6 +75,7 @@ class CovarianceArchitectureOptimizer:
         target,
         num_auxiliary_modes=0,
         sigma_in_signal=None,
+        sigma_in_noise=None,
         intrinsic_losses=False,
         free_decay_ratios=None,
         optimize_gauge=True,
@@ -120,6 +124,7 @@ class CovarianceArchitectureOptimizer:
         self.oracle = CovarianceOracle(
             self.param, target,
             sigma_in_signal=sigma_in_signal,
+            sigma_in_noise=sigma_in_noise,
             constraints=constraints,
             stability_margin=stability_margin,
             stability_weight=stability_weight,

@@ -157,8 +157,16 @@ class Parametrization:
             return np.ones(self.num_modes, dtype=bool)
         if flags is False:
             return np.zeros(self.num_modes, dtype=bool)
+        flags = np.asarray(flags, dtype=bool)
+        if flags.size > self.num_modes:
+            if flags[self.num_modes:].any():
+                raise ValueError(
+                    "flag set for mode %i, but the device only has %i modes"
+                    % (int(np.argmax(flags[self.num_modes:])) + self.num_modes,
+                       self.num_modes))
+            flags = flags[: self.num_modes]
         out = np.zeros(self.num_modes, dtype=bool)
-        out[: len(flags)] = np.asarray(flags, dtype=bool)
+        out[: flags.size] = flags
         return out
 
     def _new(self, name, vartype):
