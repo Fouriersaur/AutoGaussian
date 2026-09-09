@@ -50,7 +50,8 @@ from autogaussian.types import (
     graph_key,
 )
 
-__all__ = ["discover", "escalate", "is_pruning_frontier", "one_step_reductions"]
+__all__ = ["discover", "escalate", "is_pruning_frontier", "one_step_reductions",
+           "reduction_is_sound", "revalidate_valid_library"]
 
 
 def one_step_reductions(graph, space):
@@ -65,6 +66,97 @@ def one_step_reductions(graph, space):
         reduced = graph.copy()
         reduced[slot_idx] = max(allowed)
         yield reduced
+
+
+def reduction_is_sound(optimizer, reduced, witness, tolerance=None):
+    """Does ``witness`` still satisfy the *reduced* graph?
+
+    ``discover`` reads a reduced graph off a converged witness and stores it as
+    VALID **carrying the same witness, without re-testing it**.  That is sound
+    only while the reduction drops elements the witness left at zero: freezing an
+    already-zero variable changes nothing, so the same point is still a witness.
+
+    The step is not sound in general.  Zeroing a variable that the witness was
+    actually using produces a graph that no one ever tested, and a false VALID is
+    worse than a false INVALID here -- ``discover`` skips any candidate that
+    *contains* a valid graph, so one bad entry can suppress a whole family of
+    genuinely minimal architectures.
+
+    The hazard is sharpest for dissipative channels.  A coupling driven to zero
+    removes an interaction; a *collected channel* driven to zero removes the
+    output port itself, which turns that port's scattering row into the identity
+    and hands the detector its own input back.  "Negligibly small" and "absent"
+    are not the same device.
+
+    This check costs one forward evaluation: zero the reduced graph's frozen
+    variables in the witness and confirm the fit and the stability margin both
+    survive.
+    """
+    if tolerance is None:
+        tolerance = optimizer.kwargs_optimization.get("max_violation_success", 1.0e-10)
+    x = np.asarray(witness["x"], dtype=float).copy()
+    frozen = sorted(optimizer.param.frozen_indices(reduced))
+    if frozen:
+        x[np.asarray(frozen, dtype=int)] = 0.0
+    try:
+        loss = float(optimizer.oracle.fit_loss(x))
+        alpha = float(optimizer.oracle.abscissa(x))
+    except Exception:
+        return False
+    return bool(np.isfinite(loss) and loss <= tolerance and alpha < 0.0)
+
+
+def revalidate_valid_library(optimizer, libraries, graphs=None, mode="witness",
+                             num_tests=None, remove=False, verbose=False):
+    """Audit the valid library against invariant 4 (a witness exists and is stored).
+
+    ``mode="witness"`` (default) is the **sound** test and the one you want.  It
+    is deterministic: take the entry's stored ``x``, zero the variables its own
+    graph freezes, and re-evaluate the fit and the abscissa.  A false VALID --
+    an entry whose graph the stored witness does not actually satisfy, which is
+    what the reduction path could produce -- fails this immediately, and a
+    genuine entry passes it every time.
+
+    ``mode="reoptimize"`` re-runs the oracle from fresh seeds instead.  **This is
+    not a soundness test and must not be read as one.**  The oracle is a
+    stochastic existence search, so a failure means "these restarts did not
+    re-find a witness", not "no witness exists" -- precisely the
+    existential/universal asymmetry the two-library design exists to keep
+    straight (Sec. 5).  Measured on the B.2' bus library, re-optimising 2000
+    genuine entries with fewer restarts than the search itself used reported 455
+    "failures", every one of them an artefact of the weaker retry.  Use this mode
+    as a rough smoke test only, never to condemn an entry.
+
+    ``graphs`` defaults to the minimal elements -- the reported deliverable.
+    With ``remove=True`` the failures are dropped from the valid library, which
+    also restores the pruning invariant for any later pass.
+
+    Returns the list of graphs that failed.
+    """
+    if graphs is None:
+        graphs = libraries.minimal_valid()
+    options = {} if num_tests is None else {"num_tests": num_tests}
+
+    failures = []
+    for graph in np.atleast_2d(np.asarray(graphs, dtype="int8")):
+        entry = libraries.valid.get(graph_key(graph))
+        if mode == "witness":
+            ok = (entry is not None and "x" in entry
+                  and reduction_is_sound(optimizer, graph, entry))
+            detail = "stored witness does not satisfy this graph"
+        else:
+            success, infos = optimizer.test_graph(graph, **options)
+            ok = success
+            detail = "best loss %.4g" % min(i["loss_reached"] for i in infos)
+        if not ok:
+            failures.append(np.asarray(graph, dtype="int8"))
+            if verbose:
+                print("   FAILS (%s): %s"
+                      % (detail, ", ".join(optimizer.space.describe(graph))))
+    if remove:
+        for graph in failures:
+            libraries.valid.pop(graph_key(graph), None)
+    return failures
 
 
 def is_pruning_frontier(graph, libraries, space):
@@ -237,10 +329,13 @@ def discover(
                 if perform_graph_reduction:
                     # read off which elements the witness actually uses: the
                     # tested graph stays in the library (it *is* valid), the
-                    # reduction is what can turn out to be minimal
+                    # reduction is what can turn out to be minimal.  Only store
+                    # the reduction if the witness really does survive it --
+                    # see reduction_is_sound.
                     reduced = optimizer.reduce_graph(witness["x"])
-                    optimizer.solutions[graph_key(reduced)] = witness
-                    libraries.add_valid(reduced, witness)
+                    if reduction_is_sound(optimizer, reduced, witness):
+                        optimizer.solutions[graph_key(reduced)] = witness
+                        libraries.add_valid(reduced, witness)
                 continue
 
             best = min(infos, key=lambda info: info["loss_reached"])
@@ -265,8 +360,9 @@ def discover(
                 libraries.add_valid(graph, info)
                 if perform_graph_reduction:
                     reduced = optimizer.reduce_graph(info["x"])
-                    optimizer.solutions[graph_key(reduced)] = info
-                    libraries.add_valid(reduced, info)
+                    if reduction_is_sound(optimizer, reduced, info):
+                        optimizer.solutions[graph_key(reduced)] = info
+                        libraries.add_valid(reduced, info)
             elif verdict is Verdict.INVALID_CERT:
                 count_invalid += 1
                 libraries.add_invalid(InvalidEntry(

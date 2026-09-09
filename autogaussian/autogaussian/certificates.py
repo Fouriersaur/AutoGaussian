@@ -55,6 +55,8 @@ __all__ = [
     "certify_bath_unhosted",
     "certify_hot_purity_obstruction",
     "pbh_dark_mode",
+    "pbh_dark_mode_collective",
+    "collective_jump_pencil",
     "pbh_non_stabilizable",
     "sos_no_hurwitz",
     "lyapunov_feasible",
@@ -664,3 +666,51 @@ def certify_no_hurwitz(optimizer, graph, num_samples=0, rng=None, verbose=False)
     fired, detail = sos_no_hurwitz(optimizer, graph, num_samples=num_samples, rng=rng)
     detail["pbh"] = pbh_detail
     return fired, detail
+
+
+# ---------------------------------------------------------------------------
+# PBH under a collective jump set (Addendum Sec. 7)
+# ---------------------------------------------------------------------------
+
+def collective_jump_pencil(channels):
+    """The ``C`` block of the PBH pencil for a collective channel set.
+
+    Every channel damps, whichever end owns it, so the rows of ``K_kappa`` and
+    ``K_Gamma`` are stacked together: ``C`` is ``2 (Mk + Mg) x 2 N``.  A
+    collective jump set simply makes the pencil **taller** -- which is exactly
+    why the PBH test is native here and needs no redesign (Addendum Sec. 7).
+    """
+    import jax.numpy as jnp
+
+    blocks = []
+    for K in (channels.K_kappa(), channels.K_Gamma()):
+        K = np.asarray(K)
+        if K.size:
+            blocks.append(K)
+    if not blocks:
+        return np.zeros((0, 2 * channels.num_modes), dtype=complex)
+    return np.vstack(blocks)
+
+
+def pbh_dark_mode_collective(H_bdg, channels, margin=0.0, tolerance=None):
+    """PBH dark-mode test on a collective channel set (Addendum Sec. 7).
+
+    ``(A, C) = (M, collective_jump_pencil(channels))``.  The physics flips the
+    right way round: a subspace that certifies INVALID as
+    dissipatively-uncontrollable under private jumps *stops* certifying once a
+    collective channel reaches it -- correctly, because it genuinely became
+    feasible.  Adding channel rows can only raise the rank of the stacked
+    pencil, so the certificate is monotone in the right direction: it survives
+    hyperedge deletion and dies on hyperedge addition, which is what keeps
+    certified-INVALID downward-closed (Sec. 7).
+
+    Returns ``(non_stabilizable, detail)``.
+    """
+    from autogaussian.forward import collective_dynamical_matrix
+
+    M = np.asarray(collective_dynamical_matrix(H_bdg, channels))
+    C = collective_jump_pencil(channels)
+    if C.shape[0] == 0:
+        return True, {"reason": REASON_PBH, "conclusive": True,
+                      "detail": "no dissipative channels at all"}
+    return pbh_non_stabilizable(M, C, margin=margin, tolerance=tolerance)

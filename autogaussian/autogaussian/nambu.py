@@ -178,11 +178,16 @@ def stack_input_covariance(sigma_signal, num_modes, sigma_noise=None):
     designated loss channel *hot* (App. B.3(h)); it enters ``sigma_out`` only
     through the second term ``N sigma_noise N^dag``.
     """
-    z = jnp.zeros((2 * num_modes, 2 * num_modes), dtype=jnp.complex128)
     if sigma_noise is None:
         sigma_noise = vacuum_covariance(num_modes)
+    sigma_signal = jnp.asarray(sigma_signal, dtype=jnp.complex128)
     sigma_noise = jnp.asarray(sigma_noise, dtype=jnp.complex128)
-    return jnp.block([[sigma_signal, z], [z, sigma_noise]])
+    # the two blocks need not be the same size: with collective channels there
+    # are ``M_kappa`` collected inputs against ``M_Gamma`` environment ones
+    rows, cols = sigma_signal.shape[0], sigma_noise.shape[0]
+    upper = jnp.zeros((rows, cols), dtype=jnp.complex128)
+    lower = jnp.zeros((cols, rows), dtype=jnp.complex128)
+    return jnp.block([[sigma_signal, upper], [lower, sigma_noise]])
 
 
 def thermal_channel_covariance(occupations, num_modes):

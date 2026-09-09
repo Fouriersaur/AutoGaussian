@@ -49,7 +49,29 @@ from autogaussian.constraints import (
     QuadratureSpectrum,
     TransmissionConstraint,
 )
+from autogaussian.channels import (
+    Access,
+    Channel,
+    ChannelClass,
+    ChannelSet,
+    private_channel_set,
+)
+from autogaussian.channel_parametrization import (
+    ChannelParametrization,
+    CollectiveParametrization,
+)
+from autogaussian.hypergraph import (
+    ChannelSlot,
+    ChannelSpace,
+    TwoColouredSpace,
+    collective_usage_report,
+    spectral_fingerprint,
+)
 from autogaussian.forward import (
+    collective_dynamical_matrix,
+    collective_is_stable,
+    collective_output_covariance_quadrature,
+    collective_response_matrices,
     full_response,
     is_stable,
     max_real_eigenvalue,
@@ -57,6 +79,8 @@ from autogaussian.forward import (
     noise_response_block,
     output_covariance_quadrature,
     response_matrices,
+    scattering_sum_rule_residual,
+    unrescale_hamiltonian,
 )
 from autogaussian.graph import (
     GraphSpace,
@@ -120,6 +144,25 @@ from autogaussian.target import CovarianceTarget, P, Pin, X, qidx
 __version__ = "0.1.0"
 
 __all__ = [
+    # collective dissipative channels (Addendum)
+    "Access",
+    "Channel",
+    "ChannelClass",
+    "ChannelSet",
+    "private_channel_set",
+    "ChannelParametrization",
+    "CollectiveParametrization",
+    "ChannelSlot",
+    "ChannelSpace",
+    "TwoColouredSpace",
+    "collective_usage_report",
+    "spectral_fingerprint",
+    "collective_dynamical_matrix",
+    "collective_is_stable",
+    "collective_output_covariance_quadrature",
+    "collective_response_matrices",
+    "scattering_sum_rule_residual",
+    "unrescale_hamiltonian",
     "CovarianceTarget", "Pin", "qidx", "X", "P",
     "discover", "CovarianceArchitectureOptimizer", "find_minimum_number_auxiliary_modes",
     "CovarianceOracle", "Parametrization", "GraphSpace",
