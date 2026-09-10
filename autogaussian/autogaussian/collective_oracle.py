@@ -47,6 +47,7 @@ from autogaussian.channel_parametrization import (
     VAR_CHANNEL_PHASE,
 )
 from autogaussian.channels import Access, nambu_adjoint
+from autogaussian.constraints import ForwardContext
 from autogaussian.graph import COUPLING_WITH_PHASE, COUPLING_WITHOUT_PHASE, GraphSpace, NO_COUPLING
 from autogaussian.hypergraph import ChannelSpace, TwoColouredSpace
 from autogaussian.nambu import nambu_to_quadrature, quadrature_matrix, vacuum_covariance
@@ -141,6 +142,35 @@ class CollectiveOracle(CovarianceOracle):
     def _dynamical_matrix(self, x):
         _, _, M = self._pieces(x, 0.0)
         return M
+
+    def _forward_context(self, x, S_all, N_all, V_all):
+        """The Sec. 10 constraint view, rebuilt for the collective engine.
+
+        A constraint written against the base spec reads four things.  ``S``,
+        ``N`` and ``V`` come straight through -- with the one caveat that they
+        are indexed by *channel*, not by mode: the private controlled slots are
+        emitted in mode order ahead of every collective one, so ``S[j, i]`` is
+        still port ``j`` <- port ``i`` for the monitored ports, and the extra
+        rows are the unmonitored collective outputs.
+
+        ``H`` is the unrescaled BdG Hamiltonian.  The scalars ``kappa~`` and
+        ``gamma`` no longer exist -- Sec. 4 promoted them to jump amplitudes --
+        so they are reconstructed as the per-mode rates the active channels add
+        up to, ``sum_mu |u_{mu,i}|^2 + |v_{mu,i}|^2``.  For a purely private
+        scaffold that is exactly the base spec's ``kappa~_i`` and ``Gamma_i``;
+        with a shared channel switched on it is the total rate seen by mode
+        ``i``, which is what a per-mode rate can mean here.
+        """
+        H = self.param.hamiltonian(x)
+        Uk, Vk, Ug, Vg = self.param.channels.coupling_rows(x)
+        kappa_tilde = jnp.sum(jnp.abs(Uk) ** 2 + jnp.abs(Vk) ** 2, axis=0)
+        gamma = jnp.sum(jnp.abs(Ug) ** 2 + jnp.abs(Vg) ** 2, axis=0)
+        return ForwardContext(
+            x=x, H=H, gamma=gamma, kappa_tilde=kappa_tilde,
+            thetas=self._thetas_full(x), omegas=self.omegas,
+            S=S_all, N=N_all, V=V_all,
+            num_modes=self.num_modes, num_ports=self.num_ports,
+        )
 
 
 class CollectiveArchitectureOptimizer(CovarianceArchitectureOptimizer):

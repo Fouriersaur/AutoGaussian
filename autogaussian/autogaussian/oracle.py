@@ -215,6 +215,21 @@ class CovarianceOracle:
         H, gamma, kappa_tilde, _ = self.param.unpack(x)
         return dynamical_matrix(H, gamma, kappa_tilde)
 
+    def _forward_context(self, x, S_all, N_all, V_all):
+        """What the user constraints see (Sec. 10).
+
+        Split out of the residual so an engine with a different
+        parametrisation -- the collective one, whose rate knobs are channel
+        amplitudes rather than separate scalars -- can supply the same view
+        without the constraints knowing which engine they are running on.
+        """
+        H, gamma, kappa_tilde, thetas = self.param.unpack(x)
+        return ForwardContext(
+            x=x, H=H, gamma=gamma, kappa_tilde=kappa_tilde, thetas=thetas,
+            omegas=self.omegas, S=S_all, N=N_all, V=V_all,
+            num_modes=self.num_modes, num_ports=self.num_ports,
+        )
+
     # ------------------------------------------------------------------ #
     # loss assembly -- the FIT ONLY (Sec. 9, invariant 1)
     # ------------------------------------------------------------------ #
@@ -332,12 +347,7 @@ class CovarianceOracle:
                     parts.append(root * jnp.imag(delta))
 
             if self.constraints:
-                H, gamma, kappa_tilde, thetas = self.param.unpack(x)
-                ctx = ForwardContext(
-                    x=x, H=H, gamma=gamma, kappa_tilde=kappa_tilde, thetas=thetas,
-                    omegas=self.omegas, S=S_all, N=N_all, V=V_all,
-                    num_modes=self.num_modes, num_ports=self.num_ports,
-                )
+                ctx = self._forward_context(x, S_all, N_all, V_all)
                 values = jnp.concatenate([jnp.atleast_1d(c(ctx)) for c in self.constraints])
                 parts.append(jnp.real(values))
                 parts.append(jnp.imag(values))
@@ -394,8 +404,9 @@ class CovarianceOracle:
         return np.array([self.covariance(x, omega, ports_only) for omega in np.asarray(omegas)])
 
     def scattering(self, x, omega=0.0):
-        H, gamma, kappa_tilde, _ = self.param.unpack(jnp.asarray(x))
-        S, N = response_matrices(H, gamma, kappa_tilde, float(omega))
+        # via _responses so an engine with its own forward map (the collective
+        # one) inherits this helper instead of re-implementing it
+        S, N, _ = self._responses(jnp.asarray(x), float(omega))
         return np.asarray(S), np.asarray(N)
 
     def fit_loss(self, x):
