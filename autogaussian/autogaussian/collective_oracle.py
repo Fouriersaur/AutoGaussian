@@ -361,7 +361,17 @@ def collective_cooperativities(optimizer, graph, x, tolerance=1e-9):
     in the base spec's normalisation where every ``kappa_i`` is pinned to 1.
     Here the collected rate is a free channel amplitude, so the cooperativity is
 
-        C_ij = 4 |H_ij|^2 / (kappa_i kappa_j),      kappa_i = |u_i|^2
+        C_ij = 4 |H_ij|^2 / (kappa_i kappa_j),
+        kappa_i = sum_mu |u_{mu,i}|^2 + |v_{mu,i}|^2   over *controlled* mu
+
+    -- every channel the mode is damped into and read out of, collective ones
+    included, which is the same rate
+    :class:`~autogaussian.constraints.LinewidthAnchor` anchors and the same one
+    the constraint context reports.  Counting only the *private* controlled
+    channel is wrong once a shared bath is switched on: a mode whose damping
+    comes entirely from a collective channel then reads ``kappa_i = 0`` and
+    every cooperativity touching it diverges, which is a bookkeeping artefact
+    and not a limit point.
 
     and the two disagree by orders of magnitude whenever the fit moves a rate off
     1.  On the B.2' bus architecture ``physical_report`` prints 0.42 and 2.44
@@ -389,10 +399,10 @@ def collective_cooperativities(optimizer, graph, x, tolerance=1e-9):
 
     kappa = np.zeros(num_modes)
     for channel in channels:
-        if channel.access is not Access.CONTROLLED or not channel.is_private:
+        if channel.access is not Access.CONTROLLED:
             continue
-        mode = channel.support[0]
-        kappa[mode] += abs(channel.u[mode]) ** 2
+        for mode in channel.support:
+            kappa[mode] += abs(channel.u[mode]) ** 2 + abs(channel.v[mode]) ** 2
 
     g, nu = [np.asarray(block) for block in optimizer.param.coherent.blocks(
         jnp.asarray(x))]

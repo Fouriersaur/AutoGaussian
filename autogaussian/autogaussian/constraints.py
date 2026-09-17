@@ -24,6 +24,9 @@ __all__ = [
     "IsolationConstraint",
     "EqualCooperativities",
     "CooperativityBudget",
+    "CollectiveCooperativityBudget",
+    "DissipativeRateBudget",
+    "LinewidthAnchor",
     "PurityFloor",
     "QuadratureSpectrum",
     "MinimumIntrinsicLoss",
@@ -159,6 +162,127 @@ class CooperativityBudget(BaseConstraint):
                                    jnp.abs(ctx.H[:n, n:]).ravel()])
         excess = 4.0 * entries ** 2 - self.maximum
         return jnp.sqrt(self.weight) * jnp.maximum(excess, 0.0)
+
+
+@dataclass
+class CollectiveCooperativityBudget(BaseConstraint):
+    """``CooperativityBudget`` for the collective engine (Addendum Sec. 4).
+
+    The base-spec budget caps ``4|H_ij|^2``, which is the cooperativity *only*
+    in the normalisation where every ``kappa_i`` is pinned to 1.  On the
+    collective scaffold the collected rate is a free jump amplitude, so
+    ``4|H_ij|^2`` is not dimensionless and a cap on it is not a pump budget: the
+    scale gauge ``(H, K) -> (sH, sK)`` walks straight through it.  The
+    dimensionless statement is
+
+        C_ij = 4 |H_ij|^2 / (kappa_i kappa_j) <= maximum ,
+
+    with ``kappa_i`` the total rate the mode's controlled channels add up to --
+    the same quantity :func:`~autogaussian.collective_oracle.collective_cooperativities`
+    reports, and the reason that helper exists rather than ``physical_report``.
+
+    ``include_detunings`` also caps ``4 Delta_i^2 / kappa_i^2``, matching the
+    base-spec flag.
+
+    Using this on the base spec is harmless but pointless: there ``kappa~_i`` is
+    a live variable too, so the two budgets differ, and
+    :class:`CooperativityBudget` is the one App. A.4 is written against.
+    """
+
+    maximum: float
+    include_detunings: bool = True
+    weight: float = 1.0
+
+    def __call__(self, ctx):
+        n = ctx.num_modes
+        kappa = jnp.asarray(ctx.kappa_tilde)[:n]
+        outer = kappa[:, None] * kappa[None, :]
+        # an undamped mode is rejected by the stability gate, not here
+        safe = jnp.where(outer > 0.0, outer, 1.0)
+
+        normal = ctx.H[:n, :n]
+        if not self.include_detunings:
+            normal = normal - jnp.diag(jnp.diag(normal))
+        cooperativities = jnp.concatenate([
+            (4.0 * jnp.abs(normal) ** 2 / safe).ravel(),
+            (4.0 * jnp.abs(ctx.H[:n, n:]) ** 2 / safe).ravel(),
+        ])
+        excess = cooperativities - self.maximum
+        return jnp.sqrt(self.weight) * jnp.maximum(excess, 0.0)
+
+    def __str__(self):
+        return "CollectiveCooperativityBudget(C <= %g)" % self.maximum
+
+
+@dataclass
+class DissipativeRateBudget(BaseConstraint):
+    """Cap every per-mode damping rate at ``maximum`` reference linewidths.
+
+    :class:`CooperativityBudget` and :class:`CollectiveCooperativityBudget` both
+    read ``ctx.H``, so they are budgets on *coherent* pumps only.  On the base
+    spec that is the whole story, because the rates are pinned there.  On the
+    collective scaffold it leaves a hole: a device can meet the target with no
+    Hamiltonian at all -- a purely dissipative solution -- and then no coherent
+    budget touches it, while the jump amplitudes that do the work run away.
+    Those amplitudes are pumps too: an anomalous (Bogoliubov) dissipator is
+    parametrically driven, so an unbounded one is the same ``C -> infinity``
+    limit point in a different colour.
+
+    The residual caps the total rate each mode sees from its uncontrolled
+    channels -- and, with ``include_controlled``, from its controlled ones -- in
+    units of ``reference_mode``'s collected rate, which is the linewidth
+    :class:`LinewidthAnchor` fixed.  Use the two together: the anchor says which
+    frequency is 1, this says nothing may be more than ``maximum`` of it.
+    """
+
+    maximum: float
+    reference_mode: int = 0
+    include_controlled: bool = True
+    weight: float = 1.0
+
+    def __call__(self, ctx):
+        reference = jnp.asarray(ctx.kappa_tilde)[int(self.reference_mode)]
+        safe = jnp.where(reference > 0.0, reference, 1.0)
+        rates = jnp.asarray(ctx.gamma)
+        if self.include_controlled:
+            rates = jnp.concatenate([rates, jnp.asarray(ctx.kappa_tilde)])
+        excess = rates / safe - self.maximum
+        return jnp.sqrt(self.weight) * jnp.maximum(excess, 0.0)
+
+    def __str__(self):
+        return "DissipativeRateBudget(rates <= %g kappa~_%i)" % (
+            self.maximum, self.reference_mode)
+
+
+@dataclass
+class LinewidthAnchor(BaseConstraint):
+    """``kappa~_mode = value`` -- declare which linewidth ``Omega`` is read in.
+
+    The forward map sees ``Omega`` only through ``Omega/kappa`` (App. A.4), so
+    the collected rate is a stretch factor on the frequency axis.  In the base
+    spec it is bounded by ``log_decay_ratio_bound``; on the collective scaffold
+    it is a jump amplitude, that bound does not exist, and the scale gauge
+    ``(H, K) -> (sH, sK)`` makes the stretch exactly free.
+
+    Any target whose pins constrain the *shape* of a spectrum but not its
+    *width* -- a flat band above all (B.4) -- is degenerate under that gauge and
+    needs this anchor, which is the collective-engine spelling of
+    ``kappa~ == 1``: it fixes the time unit to be mode ``mode``'s own linewidth,
+    so a pinned band at ``|Omega| <= W`` means ``W`` of *that* linewidth.  One
+    anchor is enough; it removes the one-parameter redundancy, and the remaining
+    rates stay free to move relative to it.
+    """
+
+    mode: int = 0
+    value: float = 1.0
+    weight: float = 1.0
+
+    def __call__(self, ctx):
+        kappa = jnp.asarray(ctx.kappa_tilde)[int(self.mode)]
+        return jnp.array([jnp.sqrt(self.weight) * (kappa - self.value)])
+
+    def __str__(self):
+        return "LinewidthAnchor(kappa~_%i == %g)" % (self.mode, self.value)
 
 
 # ---------------------------------------------------------------------------

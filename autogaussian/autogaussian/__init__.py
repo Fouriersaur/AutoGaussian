@@ -40,8 +40,11 @@ _jax.config.update("jax_enable_x64", True)
 
 from autogaussian.constraints import (
     CustomConstraint,
+    CollectiveCooperativityBudget,
     CooperativityBudget,
+    DissipativeRateBudget,
     EqualCooperativities,
+    LinewidthAnchor,
     IsolationConstraint,
     MinimumIntrinsicLoss,
     MinimumTransmission,
@@ -168,6 +171,7 @@ __all__ = [
     "CovarianceOracle", "Parametrization", "GraphSpace",
     "TransmissionConstraint", "MinimumTransmission", "IsolationConstraint",
     "EqualCooperativities", "CooperativityBudget", "CustomConstraint",
+    "CollectiveCooperativityBudget", "LinewidthAnchor", "DissipativeRateBudget",
     "PurityFloor", "QuadratureSpectrum", "MinimumIntrinsicLoss",
     "response_matrices", "full_response", "output_covariance_quadrature",
     "noise_response_block", "noise_response_amplitude",
