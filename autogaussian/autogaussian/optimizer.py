@@ -373,9 +373,13 @@ class CovarianceArchitectureOptimizer:
         """Full Sec. 6 loop; returns the irreducible graphs.
 
         ``engine='two_library'`` (default) runs :func:`autogaussian.search.discover`
-        and leaves the two libraries on ``self.libraries``; a graph is only
-        removed from consideration by a certificate, so no post-hoc repair pass
-        is needed and ``verify`` defaults to ``False``.
+        and leaves the two libraries on ``self.libraries``.  In its default fast
+        mode a graph is pruned once it has failed the oracle *and* the
+        escalation reruns (``condemn_after_escalation``), which is quick and
+        keeps every returned graph genuinely valid, but no longer claims
+        completeness -- pass ``search_kwargs`` of
+        ``use_certificates=True, condemn_after_escalation=False`` for the sound
+        walk in which only a certificate prunes.
 
         ``engine='legacy'`` is the AUTOSCATTER walk: any invalid condemns its
         subgraphs, and :meth:`verify_irreducibility` afterwards re-derives
@@ -396,8 +400,9 @@ class CovarianceArchitectureOptimizer:
                 self.verify_irreducibility(num_tests=verify_num_tests, progress=progress,
                                            **(verify_kwargs or {}))
             print("optimisation finished, list of irreducible graphs has %i elements "
-                  "(%i uncertified rejections)"
-                  % (len(self.valid_combinations), libraries.n_uncertified()))
+                  "(%i uncertified rejections, %i of them pruning)"
+                  % (len(self.valid_combinations), libraries.n_uncertified(),
+                     libraries.n_condemning_uncertified()))
             return np.array(self.valid_combinations, dtype="int8")
 
         if engine != "legacy":

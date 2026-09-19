@@ -244,22 +244,38 @@ A search that fails to find a witness has learned something much weaker than a s
 proves none exists, and the difference decides whether a whole subtree may be deleted. The
 engine therefore keeps **two libraries** and a `certified` flag:
 
-| verdict           | meaning                                  | may condemn subgraphs? |
-|-------------------|------------------------------------------|------------------------|
-| `VALID`           | witness stored (`fit ≤ tol`, `α < 0`)    | extensions are valid   |
-| `INVALID_PROV`    | the oracle did not find a witness        | **no**                 |
-| `INVALID_CERT`    | a certificate proved there is none       | yes                    |
-| `INVALID_DEFAULT` | escalation ran, nothing fired            | **no**                 |
+| verdict           | meaning                                  | may condemn subgraphs?        |
+|-------------------|------------------------------------------|-------------------------------|
+| `VALID`           | witness stored (`fit ≤ tol`, `α < 0`)    | extensions are valid          |
+| `INVALID_PROV`    | the oracle did not find a witness        | **no**                        |
+| `INVALID_CERT`    | a certificate proved there is none       | yes                           |
+| `INVALID_DEFAULT` | escalation ran, still invalid            | fast mode: yes; sound mode: no |
+
+**Two modes.** The default is the *fast* one: certificates off, and a graph that failed the
+oracle **and** failed again from a wider set of fresh seeds (`escalate_num_tests`, 3x the oracle
+budget by default) is condemned along with its subtree. Nothing is proved, so entries stay
+`certified=False` and the run reports a **minimal** list, not a complete one — everything
+returned is a genuine architecture with a stored witness, but a graph the oracle repeatedly
+missed takes its subtree down with it.
 
 ```python
-result = discover(target, num_auxiliary_modes=0)
+result = discover(target, num_auxiliary_modes=0)                       # fast (default)
+result = discover(target, num_auxiliary_modes=0,                       # sound, certified
+                  search_kwargs={"use_certificates": True,
+                                 "condemn_after_escalation": False})
 result["n_uncertified"]     # graphs rejected without a proof
 print(result["completeness"])
-# The list of irreducible graphs is complete up to at most 3 false negatives ...
+# The list of irreducible graphs is NOT claimed complete: 14 graphs were rejected ...
 ```
 
+On the EPR target the fast mode uses ~5x fewer oracle calls than the certified walk and finds the
+same two textbook solutions; the wide escalation budget is what buys that back — at the plain 1x
+budget it lost the two-mode-squeezing solution on half the seeds. Re-run with the sound settings
+when completeness is the claim being made.
+
 `n_uncertified == 0` is the only configuration in which the run may claim a complete, certified
-answer; otherwise the uncertified rejections are listed by name so the caveat is auditable. The
+answer; otherwise the uncertified rejections are listed (first 20, marked `pruned` when they
+condemned a subtree) so the caveat is auditable. The
 escalation ladder (`autogaussian/search.py`) is: cheap structural certificates → fresh seeds from
 different feasible components (this rung can promote a graph to `VALID`) → PBH dark mode → give
 up loudly. Certificates live in `certificates.py`:
@@ -276,9 +292,11 @@ up loudly. Certificates live in `certificates.py`:
   fixed; the v1 stand-in samples the feasible set and reports evidence, which is not a proof, so
   it never certifies. Everything it touches becomes `INVALID_DEFAULT` and keeps its subtree alive.
 
-The price is oracle calls: not condemning uncertified subtrees means testing them. Pass
-`search_kwargs={"prune_uncertified": True}` to reinstate AUTOSCATTER's faster, **unsound** rule,
-or `engine="legacy"` for the old walk plus its `verify_irreducibility` repair pass.
+The price of the sound mode is oracle calls: not condemning uncertified subtrees means testing
+them, and the certificate ladder itself (an SDP per escalation) is not cheap for how rarely it
+fires — which is why it is off by default. Pass `search_kwargs={"prune_uncertified": True}` for
+the most aggressive rule of all (prune on *any* invalid, including ones that were never
+escalated), or `engine="legacy"` for the old walk plus its `verify_irreducibility` repair pass.
 
 ## Notes on the oracle
 

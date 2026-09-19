@@ -12,8 +12,7 @@ zero).  The second is a theorem *only for a certified* invalid.  For a graph
 the oracle merely failed to solve, applying it deletes an entire subtree on the
 strength of an optimiser's bad afternoon -- and the minimal solutions live at
 the bottom of exactly those subtrees.  This module therefore keeps two
-libraries and prunes with the second rule **only** when the entry carries
-``certified=True``:
+libraries and keeps the two statements apart:
 
     for g in breadth_first_subgraphs(root):
         v, witness = oracle(g)
@@ -22,17 +21,27 @@ libraries and prunes with the second rule **only** when the entry carries
         elif not is_pruning_frontier(g):
             invalid[g] = InvalidEntry(certified=False, reason="provisional")
         else:
-            v, w = escalate(g)                       # fresh seeds, then proofs
+            v, w = escalate(g)                       # fresh seeds (+ proofs)
             VALID        -> valid[g] = w
-            INVALID_CERT -> invalid[g] certified, subgraphs condemned
-            otherwise    -> invalid[g] uncertified, subgraphs still tested
+            INVALID_CERT -> invalid[g] certified,  subgraphs condemned
+            otherwise    -> invalid[g] uncertified, condemning iff fast mode
 
-The price is paid in oracle calls, and the exchange rate is
-:func:`is_pruning_frontier`: escalation (which is the expensive part) only runs
-where condemning a subtree would actually save work.  What comes out is
-``n_uncertified``, the number of graphs rejected without proof -- the honest
-completeness caveat of Sec. 8, and the reason the invalid library is an output
-of the algorithm rather than a scratch pad.
+**Two modes, one knob each.**  ``condemn_after_escalation`` (default ``True``)
+is the fast mode: a graph that fails the oracle *and* fails again from fresh
+seeds is taken at its word and its subgraphs are pruned.  That is not a proof,
+so the entry stays ``certified=False`` and the run reports a minimal list, not
+a complete one -- what survives is still genuinely valid (every entry carries a
+witness), there may just be minimal graphs the oracle missed.  Set it to
+``False`` for the sound walk, where only a certificate prunes.
+
+``use_certificates`` (default ``False``) is the other knob.  The certificate
+ladder -- the physicality SDP, PBH dark modes -- is expensive and in practice
+fires on few graphs, so it is off by default; turn it on together with
+``condemn_after_escalation=False`` to reproduce the fully certified search.
+
+What comes out is ``n_uncertified``, the number of graphs rejected without
+proof, and ``n_condemning_uncertified``, how many of those deleted a subtree --
+the honest caveat of Sec. 8.
 """
 
 import numpy as np
@@ -163,24 +172,27 @@ def is_pruning_frontier(graph, libraries, space):
     """Would certifying ``graph`` actually prune anything?
 
     ``True`` iff at least one immediate subgraph is still undecided *and* is not
-    already condemned by some other certified invalid.  Escalation is the
-    expensive rung of the ladder, so it is spent only where a certificate would
-    buy a subtree.
+    already condemned by some other pruning invalid.  Escalation is the
+    expensive rung of the ladder, so it is spent only where condemning the
+    graph would buy a subtree.
     """
-    certified = libraries.certified_invalid_graphs()
+    condemning = libraries.condemning_invalid_graphs()
     for child in one_step_reductions(graph, space):
         key = graph_key(child)
         if key in libraries.valid or key in libraries.invalid:
             continue
-        if certified.size and is_subgraph_of_any(child, certified):
+        if condemning.size and is_subgraph_of_any(child, condemning):
             continue
         return True
     return False
 
 
 def escalate(optimizer, graph, libraries, reason, num_tests=None,
-             use_certificates=True, verbose=False, cache=None):
+             use_certificates=False, verbose=False, cache=None):
     """The Sec. 6 escalation ladder for one provisionally invalid graph.
+
+    With ``use_certificates=False`` (the default) only rung 2 runs: fresh seeds,
+    and a verdict either way.  The full ladder is:
 
     1. **Cheap certificates.**  The structural ones -- a passive graph cannot
        leave the vacuum, the pins are not a covariance matrix at all -- are
@@ -245,7 +257,8 @@ def discover(
     progress=True,
     verbose=True,
     escalate_num_tests=None,
-    use_certificates=True,
+    use_certificates=False,
+    condemn_after_escalation=True,
     prune_uncertified=False,
     max_oracle_calls=None,
     perform_graph_reduction=True,
@@ -259,12 +272,25 @@ def discover(
     min_complexity : int
         Stop the descent at this complexity level.
     escalate_num_tests : int, optional
-        Restart budget of the escalation rung (default: the normal oracle
-        budget again, spent on *fresh* seeds).
+        Restart budget of the escalation rung, spent on *fresh* seeds.  Default:
+        three times the oracle budget in fast mode, once in the sound mode.
+        The multiplier is where fast mode buys its accuracy back -- a failed
+        escalation now deletes a subtree, so it is worth restarting properly
+        before believing it.  (On the EPR target the plain 1x budget lost the
+        two-mode-squeezing solution on half the seeds; 3x found it on all of
+        them, still at a fifth of the certified walk's oracle calls.)
     use_certificates : bool
-        Run :mod:`autogaussian.certificates` on the escalation rung.  With
-        ``False`` every unresolved graph becomes ``INVALID_DEFAULT``, which is
-        the M4 configuration: nothing is ever pruned by an invalid.
+        Run :mod:`autogaussian.certificates` on the escalation rung.  Off by
+        default: the ladder is expensive and rarely fires.  With ``False``
+        every unresolved graph becomes ``INVALID_DEFAULT``.
+    condemn_after_escalation : bool
+        Fast mode, on by default.  A graph that is still invalid after the
+        escalation reruns condemns its subgraphs, exactly as a certificate
+        would.  The entry stays ``certified=False``, so the run reports a
+        *minimal* list rather than a complete one: everything returned is a
+        real architecture with a stored witness, but a graph the oracle
+        repeatedly missed takes its subtree down with it.  Set to ``False``
+        (with ``use_certificates=True``) for the sound, fully certified walk.
     prune_uncertified : bool
         **Unsound**, off by default: reinstate AUTOSCATTER's rule that *any*
         invalid condemns its subgraphs.  Fast, and re-opens exactly the
@@ -281,9 +307,13 @@ def discover(
     space = optimizer.space
     libraries = Libraries()
     if escalate_num_tests is None:
-        # fresh seeds, not more of the same: doubling the budget buys much less
-        # than restarting in a different feasible component (Sec. 5)
+        # fresh seeds, not more of the same: restarting in a different feasible
+        # component buys much more than grinding the same one (Sec. 5).  In
+        # fast mode the escalation is also the last word before a subtree is
+        # deleted, so it gets a wider budget.
         escalate_num_tests = optimizer.kwargs_optimization.get("num_tests", 10)
+        if condemn_after_escalation:
+            escalate_num_tests *= 3
 
     if verbose:
         print("start breadth-first search over %i slots (max complexity %i)"
@@ -369,13 +399,17 @@ def discover(
                     np.asarray(graph, dtype="int8"), certified=True,
                     reason=info["reason"], info=info))
             else:
+                # escalation ran and the graph is still invalid.  In fast mode
+                # that is where the questioning stops: condemn the subtree
+                # without a certificate, and say so in the bookkeeping.
                 count_invalid += 1
                 libraries.add_invalid(InvalidEntry(
                     np.asarray(graph, dtype="int8"), certified=False,
                     reason=REASON_DEFAULT,
                     info={"failed_on": info["reason"],
                           "loss_reached": info["best"]["loss_reached"],
-                          "max_real_eigenvalue": info["best"]["max_real_eigenvalue"]}))
+                          "max_real_eigenvalue": info["best"]["max_real_eigenvalue"]},
+                    condemning=bool(condemn_after_escalation)))
 
         # per-level statistics, in the shape the reporting helpers expect
         optimizer.tested_complexities.append(level)
@@ -394,12 +428,14 @@ def _candidates_at(space, level, libraries, prune_uncertified=False):
 
     * the graph contains a known valid graph  -> valid by monotonicity, and not
       minimal, so it cannot be part of the answer;
-    * the graph is a subgraph of a **certified** invalid -> invalid by the
-      certificate, which really does cover the whole subtree.
+    * the graph is a subgraph of a **condemning** invalid -> either a
+      certificate covers the whole subtree, or (fast mode) the graph failed the
+      oracle and the escalation reruns and is trusted to.
 
-    ``prune_uncertified`` adds the unsound third one.
+    ``prune_uncertified`` adds the third, weakest one: prune on *any* invalid,
+    including the provisional ones that were never escalated.
     """
-    certified = libraries.certified_invalid_graphs()
+    certified = libraries.condemning_invalid_graphs()
     valid = libraries.valid_graphs()
     uncertified = None
     if prune_uncertified:

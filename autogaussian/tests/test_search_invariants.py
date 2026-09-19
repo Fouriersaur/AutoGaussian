@@ -65,14 +65,15 @@ def test_valid_entries_carry_a_witness_that_fits_and_is_stable():
 def test_uncertified_invalids_never_condemn_their_subgraphs():
     """Invariant 2 -- the correctness-critical one (Sec. 5.7, Sec. 8.4).
 
-    With the certificates switched off, *nothing* may be pruned by an invalid:
-    every immediate subgraph of an uncertified invalid must itself have been
-    decided, unless it was skipped for the one sound reason (it contains a
-    valid graph, hence is valid and not minimal).
+    In the sound mode (certificates off *and* fast-mode condemnation off)
+    *nothing* may be pruned by an invalid: every immediate subgraph of an
+    uncertified invalid must itself have been decided, unless it was skipped
+    for the one sound reason (it contains a valid graph, hence is valid and not
+    minimal).
     """
     optimizer = build(single_mode_squeezer(0.5))
     libraries = discover(optimizer, progress=False, verbose=False,
-                         use_certificates=False)
+                         use_certificates=False, condemn_after_escalation=False)
 
     assert libraries.n_certified() == 0
     assert libraries.n_uncertified() == len(libraries.invalid)
@@ -99,7 +100,8 @@ def test_certified_invalids_do_prune():
         problem.target, num_auxiliary_modes=0, seed=0, make_initial_test=False,
         graph_space=space, optimize_gauge=False,
         kwargs_optimization={"num_tests": 3})
-    libraries = discover(optimizer, progress=False, verbose=False)
+    libraries = discover(optimizer, progress=False, verbose=False,
+                         use_certificates=True, condemn_after_escalation=False)
 
     assert libraries.n_certified() >= 1
     certified = libraries.certified_invalid_graphs()
@@ -131,6 +133,11 @@ def test_completeness_statement_tracks_the_uncertified_count():
     statement = libraries.completeness_statement(optimizer.space)
     if libraries.n_uncertified() == 0:
         assert "complete and certified" in statement
+    elif libraries.n_condemning_uncertified():
+        # fast mode: subtrees were pruned without proof, so completeness is not
+        # claimed at all -- the statement has to say so out loud
+        assert "NOT claimed complete" in statement
+        assert "%i of those" % libraries.n_condemning_uncertified() in statement
     else:
         assert "complete up to at most %i" % libraries.n_uncertified() in statement
     assert optimizer.n_uncertified() == 0     # not run through the optimizer yet

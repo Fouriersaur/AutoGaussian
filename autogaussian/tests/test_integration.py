@@ -47,7 +47,11 @@ def test_pipeline_reports_libraries_and_completeness():
     if result["n_uncertified"] == 0:
         assert "complete and certified" in statement
     else:
-        assert "complete up to at most" in statement
+        if libraries.n_condemning_uncertified():
+            # fast mode pruned subtrees without proof: no completeness claim
+            assert "NOT claimed complete" in statement
+        else:
+            assert "complete up to at most" in statement
         # each uncertified rejection is named, so the caveat is auditable
         for entry in libraries.uncertified_entries():
             assert not entry.certified

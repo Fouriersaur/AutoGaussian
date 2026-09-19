@@ -365,6 +365,7 @@ class StubOptimizer:
 def run_stub_search(**kwargs):
     space = build_small_space(num_modes=2)
     optimizer = StubOptimizer(space)
+    kwargs.setdefault("condemn_after_escalation", False)
     libraries = discover(optimizer, progress=False, verbose=False,
                          use_certificates=False, perform_graph_reduction=False,
                          **kwargs)
@@ -393,7 +394,8 @@ def test_invariant_4_valid_entries_carry_a_witness():
 
 
 def test_invariant_2_uncertified_invalids_never_condemn_subgraphs():
-    """The correctness-critical one, now on the two-coloured poset."""
+    """The correctness-critical one, now on the two-coloured poset (sound mode:
+    ``run_stub_search`` turns fast-mode condemnation off)."""
     space, _, libraries = run_stub_search()
     assert libraries.n_certified() == 0
     assert libraries.n_uncertified() == len(libraries.invalid)
